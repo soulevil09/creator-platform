@@ -5,8 +5,7 @@
 // ORM:      Prisma — TypeScript-first, generated type-safe client, first-class
 //           migrations, and an easy path to swap the DB provider later.
 //
-// No models yet — domain models are introduced from Session 02 onward.
-// This session only wires up the datasource and the client generator.
+// Session 02 introduces the first domain model: User (auth + RBAC).
 // =============================================================================
 
 generator client {
@@ -19,4 +18,31 @@ generator client {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+}
+
+// ─── RBAC roles ──────────────────────────────────────────────────────────────
+// ADMIN is provisioned out-of-band (never via public registration).
+enum Role {
+  ADMIN
+  MODEL
+  SUBSCRIBER
+}
+
+// ─── User ────────────────────────────────────────────────────────────────────
+// Auth identity + RBAC. Passwords are bcrypt hashes (cost 12); the refresh
+// token is persisted only as a bcrypt hash (cost 10) so a DB leak can't replay
+// sessions. The email verification token is a one-time random value (not a
+// secret key) and is stored in plain text with a 24h expiry.
+model User {
+  id                   String    @id @default(cuid())
+  email                String    @unique
+  passwordHash         String
+  role                 Role      @default(SUBSCRIBER)
+  displayName          String
+  isVerified           Boolean   @default(false)
+  verifyToken          String?   @unique
+  verifyTokenExpiresAt DateTime?
+  refreshTokenHash     String?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
 }

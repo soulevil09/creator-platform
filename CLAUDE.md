@@ -14,57 +14,66 @@ more robust/expensive services as revenue scales.
 ---
 
 ## Tech Stack
-> Finalized during Session 01 by Claude Code. To be updated after session completes.
 
 | Layer | Choice | Justification |
 |---|---|---|
 | Monorepo | pnpm workspaces + Turborepo | Fast, disk-efficient, strict symlinked workspaces; Turborepo caches build/lint/test. Free, no lock-in. |
 | Frontend | Next.js 14 (App Router) | TypeScript-first React, SSR/ISR, file routing, serverless-friendly deploy, i18n-ready. |
-| Backend | Fastify | Lean, fast, low-overhead — better fit for a budget/serverless start than NestJS, still scalable. |
-| ORM / DB | Prisma + PostgreSQL (Supabase) | Prisma = TS-first, type-safe client, migrations, swappable provider. Supabase = managed free Postgres, no card. |
-| Auth | JWT (access + refresh) — _Session 02_ | Stateless, framework-agnostic, no vendor lock-in; refresh-token rotation for security. Implemented next session. |
-| Storage | Supabase Storage / Cloudflare R2 — _Session 03_ | Both have free tiers + signed URLs; choice finalized at Session 03/04. |
-| Email | Resend — _Session 02_ | Free tier, simple API for transactional email. |
+| Backend | Fastify 5 | Lean, fast, low-overhead. Upgraded from v4 to v5 in Session 02 to align with plugin majors. |
+| ORM / DB | Prisma + PostgreSQL (Supabase) | Type-safe client, migrations, swappable provider. Supabase = managed free Postgres, no card. |
+| Auth | JWT (access 15m + refresh 7d) — httpOnly cookies, RBAC | Stateless, framework-agnostic, refresh-token rotation. Implemented in Session 02. |
+| Storage | Supabase Storage / Cloudflare R2 — _Session 03_ | Both have free tiers + signed URLs; choice finalized at Session 03. |
+| Email | Resend | Free tier, simple API for transactional email. Active from Session 02. |
 | AI Images | Replicate (SDXL) — _Session 08_ | Pay-per-use, no subscription, hosted SDXL; swappable behind an `AI_PROVIDER` abstraction. |
-| Payments | Stripe | Subscriptions + PPV + Connect (model payouts) |
+| Payments | Stripe | Subscriptions + PPV + Connect (model payouts). |
 | Lint / Format | ESLint 9 (flat) + Prettier | One root config governs all packages; modern TS standard. |
-| Tests | Vitest | ESM/TS-native, Jest-compatible, fast; `--passWithNoTests` keeps CI green pre-tests. |
-| CI | GitHub Actions | Free tier, native GitHub integration |
+| Tests | Vitest | ESM/TS-native, Jest-compatible, fast. In-memory mocks for DB + email in auth tests. |
+| CI | GitHub Actions | Free tier, native GitHub integration. |
 
 ---
 
 ## Session Map
 
-### Session 01 — Bootstrap
+### Session 01 — Bootstrap ✅ Complete
 **File:** `.claude/sessions/session-01.md`  
-**Status:** ✅ Complete  
-**Domain:** Monorepo structure, TypeScript config, CI skeleton, env setup, README, Prisma init  
+**Domain:** Monorepo structure, TypeScript config, CI skeleton, env setup, README, Prisma init
 
-**External Prerequisites:**
-- [ ] Create GitHub repo: https://github.com/new → name: `creator-platform` (private, no README)
-- [ ] Install Node.js 20 LTS: https://nodejs.org
-- [ ] Install pnpm: https://pnpm.io/installation
-- [ ] Install Claude Code CLI: https://docs.anthropic.com/claude-code
-- [ ] Create Supabase account (free): https://supabase.com → create a new project → copy `DATABASE_URL`
+**Summary:**
+- pnpm workspaces + Turborepo scaffold
+- Next.js 14 App Router (`apps/web`), Fastify (`apps/api`), shared package
+- Prisma initialized with Supabase datasource (no models yet)
+- ESLint 9 flat + Prettier, Vitest, GitHub Actions CI
+- All typecheck/lint/test jobs green
 
 ---
 
-### Session 02 — Auth
+### Session 02 — Auth ✅ Complete
 **File:** `.claude/sessions/session-02.md`  
-**Status:** ⏳ Pending  
-**Domain:** Registration (model/subscriber roles), login, JWT + refresh tokens, RBAC middleware  
+**Domain:** Registration (model/subscriber roles), login, JWT + refresh tokens, RBAC middleware
 
-**External Prerequisites:**
-- [ ] Supabase project must be running (from Session 01)
-- [ ] Copy `DATABASE_URL` from Supabase dashboard → Settings → Database
-- [ ] Set up transactional email: https://resend.com → create account (free tier) → generate API key → verify sending domain
+**Summary:**
+- `User` model + `Role` enum (ADMIN/MODEL/SUBSCRIBER) added to Prisma schema
+- Migration `20260619034002_add_user_model` applied to Supabase; unique indexes on `email` and `verifyToken`
+- POST /api/auth/register — bcrypt cost 12, 32-byte hex email verify token (24h TTL), Resend email, rate-limited 5/IP/h
+- GET /api/auth/verify-email — one-time token consumption with expiry check
+- POST /api/auth/login — bcrypt compare, 403 unverified, JWT in httpOnly/SameSite=Strict cookies, rate-limited 10/IP/15min, no tokens in body
+- POST /api/auth/refresh — token rotation, old hash invalidated; SHA-256 pre-digest before bcrypt to bypass 72-byte truncation
+- POST /api/auth/logout — cookies cleared (maxAge=0), `refreshTokenHash` nulled in DB
+- GET /api/auth/me — authenticated, returns `{ userId, email, role, displayName, isVerified }`
+- `authenticate` + `authorize(...roles)` RBAC hooks in `src/middleware/auth.ts`
+- Shared types: `Role`, `JwtPayload`, `AuthUser` added to `@creator-platform/shared`
+- `src/lib/env.ts` — startup crash if `JWT_SECRET`, `JWT_REFRESH_SECRET`, or `EMAIL_API_KEY` missing
+- 17/17 tests passing; `pnpm turbo run typecheck test lint` all green
+
+**Security fixes found during session:**
+- Fastify upgraded 4→5 (plugin majors @fastify/jwt@10, @fastify/cookie@11, @fastify/rate-limit@11 require Fastify 5 — would throw at registration on v4)
+- bcrypt 72-byte truncation: refresh token is SHA-256 digested before bcrypt hash so the full token (including signature) is protected
 
 ---
 
-### Session 03 — Model Onboarding
+### Session 03 — Model Onboarding ⏳ Pending
 **File:** `.claude/sessions/session-03.md`  
-**Status:** ⏳ Pending  
-**Domain:** Model profile data, reference image upload, AI consent/ToS flow  
+**Domain:** Model profile data, reference image upload, AI consent/ToS flow
 
 **External Prerequisites:**
 - [ ] Set up object storage: https://supabase.com/storage OR https://cloudflare.com/r2 → create bucket → copy endpoint, access key, secret key
@@ -72,10 +81,9 @@ more robust/expensive services as revenue scales.
 
 ---
 
-### Session 04 — Content Management
+### Session 04 — Content Management ⏳ Pending
 **File:** `.claude/sessions/session-04.md`  
-**Status:** ⏳ Pending  
-**Domain:** Upload pipeline, signed URL serving, watermarking, tier-based access control  
+**Domain:** Upload pipeline, signed URL serving, watermarking, tier-based access control
 
 **External Prerequisites:**
 - [ ] Storage bucket from Session 03 must be configured
@@ -83,10 +91,9 @@ more robust/expensive services as revenue scales.
 
 ---
 
-### Session 05 — Subscription & PPV
+### Session 05 — Subscription & PPV ⏳ Pending
 **File:** `.claude/sessions/session-05.md`  
-**Status:** ⏳ Pending  
-**Domain:** Stripe subscription plans, PPV unlocking, webhook handling  
+**Domain:** Stripe subscription plans, PPV unlocking, webhook handling
 
 **External Prerequisites:**
 - [ ] Create Stripe account: https://stripe.com → complete business profile
@@ -98,10 +105,9 @@ more robust/expensive services as revenue scales.
 
 ---
 
-### Session 06 — Revenue Sharing
+### Session 06 — Revenue Sharing ⏳ Pending
 **File:** `.claude/sessions/session-06.md`  
-**Status:** ⏳ Pending  
-**Domain:** Payout calculation, model balance tracking, Stripe Connect  
+**Domain:** Payout calculation, model balance tracking, Stripe Connect
 
 **External Prerequisites:**
 - [ ] Stripe account must be active (from Session 05)
@@ -111,10 +117,9 @@ more robust/expensive services as revenue scales.
 
 ---
 
-### Session 07 — Private Messaging
+### Session 07 — Private Messaging ⏳ Pending
 **File:** `.claude/sessions/session-07.md`  
-**Status:** ⏳ Pending  
-**Domain:** Real-time or async chat between subscriber and model  
+**Domain:** Real-time or async chat between subscriber and model
 
 **External Prerequisites:**
 - [ ] No new external accounts required
@@ -122,22 +127,20 @@ more robust/expensive services as revenue scales.
 
 ---
 
-### Session 08 — AI Image Personalization
+### Session 08 — AI Image Personalization ⏳ Pending
 **File:** `.claude/sessions/session-08.md`  
-**Status:** ⏳ Pending  
-**Domain:** Likeness anchor engine, hidden system prompt, preset + custom UI, billing  
+**Domain:** Likeness anchor engine, hidden system prompt, preset + custom UI, billing
 
 **External Prerequisites:**
 - [ ] Create Replicate account: https://replicate.com → sign up → go to https://replicate.com/account/api-tokens → generate token → copy `AI_PROVIDER_API_KEY`
 - [ ] Review SDXL model on Replicate: https://replicate.com/stability-ai/sdxl
-- [ ] Add billing method on Replicate (pay-per-use, no subscription needed): https://replicate.com/account/billing
+- [ ] Add billing method on Replicate (pay-per-use): https://replicate.com/account/billing
 
 ---
 
-### Session 09 — Anti-Leak & Content Protection
+### Session 09 — Anti-Leak & Content Protection ⏳ Pending
 **File:** `.claude/sessions/session-09.md`  
-**Status:** ⏳ Pending  
-**Domain:** Signed expiring URLs, screenshot deterrents, watermark hardening  
+**Domain:** Signed expiring URLs, screenshot deterrents, watermark hardening
 
 **External Prerequisites:**
 - [ ] No new external accounts required
@@ -145,20 +148,18 @@ more robust/expensive services as revenue scales.
 
 ---
 
-### Session 10 — i18n & Multilingual
+### Session 10 — i18n & Multilingual ⏳ Pending
 **File:** `.claude/sessions/session-10.md`  
-**Status:** ⏳ Pending  
-**Domain:** PT-BR + EN, i18n framework, all strings externalized  
+**Domain:** PT-BR + EN, i18n framework, all strings externalized
 
 **External Prerequisites:**
 - [ ] No new external accounts required
 
 ---
 
-### Session 11 — Admin Dashboard
+### Session 11 — Admin Dashboard ⏳ Pending
 **File:** `.claude/sessions/session-11.md`  
-**Status:** ⏳ Pending  
-**Domain:** Metrics, user management, model approval, payout oversight, moderation  
+**Domain:** Metrics, user management, model approval, payout oversight, moderation
 
 **External Prerequisites:**
 - [ ] No new external accounts required
@@ -166,21 +167,19 @@ more robust/expensive services as revenue scales.
 
 ---
 
-### Session 12 — Security Hardening & Performance Audit
+### Session 12 — Security Hardening & Performance Audit ⏳ Pending
 **File:** `.claude/sessions/session-12.md`  
-**Status:** ⏳ Pending  
-**Domain:** OWASP checklist, rate limiting, load test, DB index review  
+**Domain:** OWASP checklist, rate limiting, load test, DB index review
 
 **External Prerequisites:**
 - [ ] No new external accounts required
-- [ ] (Optional) Upstash Redis for rate limiting: https://upstash.com → create account (free tier) → create Redis DB → copy `UPSTASH_REDIS_URL` and `UPSTASH_REDIS_TOKEN`
+- [ ] (Optional) Upstash Redis for rate limiting: https://upstash.com → create Redis DB → copy `UPSTASH_REDIS_URL` and `UPSTASH_REDIS_TOKEN`
 
 ---
 
-### Session 13 — MVP Deployment
+### Session 13 — MVP Deployment ⏳ Pending
 **File:** `.claude/sessions/session-13.md`  
-**Status:** ⏳ Pending  
-**Domain:** Railway/Render/Fly.io deploy, managed DB, domain, SSL, monitoring  
+**Domain:** Railway/Render/Fly.io deploy, managed DB, domain, SSL, monitoring
 
 **External Prerequisites:**
 - [ ] Choose and create hosting account (pick one):
@@ -194,59 +193,80 @@ more robust/expensive services as revenue scales.
 ---
 
 ## Architecture Decisions
+
 _Session 01 — all choices prioritize a free tier at MVP, TypeScript-first DX, and easy swap/upgrade later._
 
-- **pnpm workspaces + Turborepo** for the monorepo: strict, symlinked, disk-efficient installs with
-  cached task running. No vendor lock-in; both free.
-- **Next.js 14 (App Router)** frontend: SSR/ISR, file-based routing, i18n-ready, deployable to any
-  Node/serverless host.
-- **Fastify** backend over NestJS: leaner and lower-overhead for a budget/serverless start, while
-  remaining straightforward to structure as the API grows.
-- **Prisma + PostgreSQL (Supabase)**: type-safe generated client + migrations; Supabase gives managed
-  free Postgres (no credit card) with storage/auth available later. The generated client outputs to
-  `apps/api/prisma/generated/` (gitignored).
-- **Internal packages consumed from source**: `@creator-platform/shared` exposes its `src/` directly
-  (via `main`/`types`/`exports`), so web and api typecheck/run without a separate build step in dev.
-- **ESLint 9 flat config + Prettier** at the root: one source of truth governs every package.
-- **Vitest** as the test runner: ESM/TS-native, Jest-compatible; `--passWithNoTests` keeps CI green
-  until real tests land.
-- **Strict TypeScript everywhere** via `tsconfig.base.json` (`strict: true`), with path aliases
-  `@shared/*`, `@web/*`, `@api/*`.
-- **CI (GitHub Actions)** runs three parallel jobs — `lint`, `typecheck`, `test` — on push/PR to `main`,
-  using pnpm with caching on Node 20.
+- **pnpm workspaces + Turborepo** — strict, symlinked, disk-efficient installs with cached task running. No vendor lock-in; both free.
+- **Next.js 14 (App Router)** — SSR/ISR, file-based routing, i18n-ready, deployable to any Node/serverless host.
+- **Fastify 5** — leaner than NestJS; upgraded from v4 to v5 in Session 02 to align with plugin ecosystem (@fastify/jwt@10, @fastify/cookie@11, @fastify/rate-limit@11).
+- **Prisma + PostgreSQL (Supabase)** — type-safe generated client + migrations; free managed Postgres, no credit card. Generated client outputs to `apps/api/prisma/generated/` (gitignored).
+- **Internal packages from source** — `@creator-platform/shared` exposes `src/` directly, no build step in dev.
+- **ESLint 9 flat config + Prettier** — single root config governs every package.
+- **Vitest** — ESM/TS-native; auth tests inject in-memory Prisma mock + fake emailer so CI stays green with no real DB or email.
 
-**Swap-readiness notes:** DB provider is swappable behind Prisma; AI provider behind an `AI_PROVIDER`
-env switch; storage behind S3-compatible env vars (Supabase Storage or Cloudflare R2). None of these
-choices require a major refactor to upgrade to paid/robust tiers.
+_Session 02 — auth-specific decisions:_
+
+- **JWT in httpOnly cookies only** — access token (15m, `JWT_SECRET`) + refresh token (7d, `JWT_REFRESH_SECRET`). Tokens are never returned in response bodies or stored in localStorage.
+- **Two namespaced @fastify/jwt registrations** — separate secrets and cookies for access vs refresh tokens. Produces `reply.accessJwtSign` / `request.accessJwtVerify` / etc. Untyped decorators augmented in `src/types/fastify-jwt.d.ts`.
+- **SHA-256 pre-digest before bcrypt for refresh tokens** — bcrypt silently truncates input at 72 bytes; a JWT's signature lives past that. Digesting to a fixed 64-char hex string first ensures the full token (signature included) is bound to the stored hash.
+- **bcryptjs** — pure JS, avoids native build issues in CI/serverless environments.
+- **Zod via manual `safeParse`** — validation at route handlers without a bridge dependency. Sufficient for MVP scale.
+- **Resend** — transactional email via SDK (`resend` npm package); `Emailer` interface allows swapping providers without touching auth code.
+- **Startup env validation** — `src/lib/env.ts` validates required secrets eagerly at boot; process crashes with a clear error if any are missing (never fails silently at first request).
+
+**Swap-readiness notes:** DB provider swappable behind Prisma; AI provider behind `AI_PROVIDER` env switch; storage behind S3-compatible env vars; email provider behind the `Emailer` interface.
 
 ---
 
 ## Repository Structure
+
 ```
 creator-platform/
 ├── apps/
-│   ├── web/                    # Next.js 14 App Router frontend (@creator-platform/web)
-│   │   ├── src/app/            # routes: layout.tsx, page.tsx
+│   ├── web/                         # Next.js 14 App Router (@creator-platform/web)
+│   │   ├── src/app/layout.tsx
+│   │   ├── src/app/page.tsx
 │   │   ├── next.config.mjs
 │   │   ├── tsconfig.json
 │   │   └── .env.example
-│   └── api/                    # Fastify backend (@creator-platform/api)
-│       ├── src/index.ts        # server bootstrap + GET /health
-│       ├── prisma/schema.prisma  # provider + datasource (no models yet)
-│       ├── scripts/postinstall.mjs # tolerant `prisma generate` wrapper
+│   └── api/                         # Fastify 5 backend (@creator-platform/api)
+│       ├── src/
+│       │   ├── index.ts             # Server bootstrap, plugin registration, /health
+│       │   ├── lib/
+│       │   │   ├── env.ts           # Startup env validation (crash if secrets missing)
+│       │   │   ├── prisma.ts        # Singleton PrismaClient
+│       │   │   └── email.ts         # Resend emailer + Emailer interface
+│       │   ├── middleware/
+│       │   │   └── auth.ts          # authenticate + authorize RBAC preHandler hooks
+│       │   ├── modules/
+│       │   │   └── auth/
+│       │   │       ├── auth.routes.ts   # HTTP layer: cookies, JWT signing, rate limits
+│       │   │       ├── auth.service.ts  # Business logic: register, login, refresh, logout
+│       │   │       ├── auth.schema.ts   # Zod validation schemas
+│       │   │       └── auth.test.ts     # 17 integration + unit tests
+│       │   └── types/
+│       │       └── fastify-jwt.d.ts # Module augmentation for namespaced JWT decorators
+│       ├── prisma/
+│       │   ├── schema.prisma        # User model + Role enum
+│       │   ├── migrations/          # 20260619034002_add_user_model
+│       │   └── generated/           # Prisma client output (gitignored)
+│       ├── scripts/
+│       │   └── postinstall.mjs      # Tolerant `prisma generate` wrapper
+│       ├── vitest.config.ts
+│       ├── vitest.setup.ts          # Test env + secret stubs
 │       ├── tsconfig.json
 │       └── .env.example
 ├── packages/
-│   └── shared/                 # framework-free types/constants/utils (@creator-platform/shared)
-│       └── src/index.ts
-├── .github/workflows/ci.yml    # lint + typecheck + test
-├── .claude/sessions/           # session specs (session-01.md …)
-├── tsconfig.base.json          # strict TS base, extended by every package
-├── turbo.json                  # task pipeline + caching
-├── eslint.config.mjs           # one flat ESLint config for the repo
+│   └── shared/                      # Framework-free types/constants/utils
+│       └── src/index.ts             # Role, JwtPayload, AuthUser + locale/currency constants
+├── .github/workflows/ci.yml         # lint + typecheck + test (parallel jobs)
+├── .claude/sessions/                # Session specs (session-01.md, session-02.md …)
+├── tsconfig.base.json               # strict TS base extended by every package
+├── turbo.json                       # Task pipeline + caching
+├── eslint.config.mjs                # Flat ESLint config for the whole repo
 ├── .prettierrc / .prettierignore
 ├── pnpm-workspace.yaml
-├── .env.example                # root env template
+├── .env.example                     # Root env template
 ├── CLAUDE.md
 └── README.md
 ```
@@ -254,32 +274,41 @@ creator-platform/
 ---
 
 ## Environment Variables Required
-Templates live in `.env.example` (root), `apps/api/.env.example`, and `apps/web/.env.example`.
+
+Templates live in `.env.example` (root) and `apps/api/.env.example`.
 All `.env*` files are gitignored; examples contain placeholders only.
 
-| Variable | Scope | Purpose |
-|---|---|---|
-| `DATABASE_URL` | api | Supabase Postgres connection string (`postgresql://…`) |
-| `JWT_SECRET` / `JWT_REFRESH_SECRET` | api | Signing secrets for access/refresh tokens (Session 02) |
-| `JWT_EXPIRES_IN` / `JWT_REFRESH_EXPIRES_IN` | api | Token lifetimes (`15m` / `7d`) |
-| `STRIPE_SECRET_KEY` | api | Stripe server key |
-| `STRIPE_WEBHOOK_SECRET` | api | Stripe webhook signing secret |
-| `STRIPE_PUBLISHABLE_KEY` / `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` | web | Stripe client key |
-| `STORAGE_ENDPOINT` / `STORAGE_BUCKET` / `STORAGE_ACCESS_KEY` / `STORAGE_SECRET_KEY` | api | Object storage (Supabase Storage or R2) |
-| `AI_PROVIDER` / `AI_PROVIDER_API_KEY` | api | AI image provider switch + key (Replicate) |
-| `EMAIL_API_KEY` / `EMAIL_FROM` | api | Transactional email (Resend) |
-| `API_PORT` / `APP_URL` | api | Server port + allowed CORS origin |
-| `NEXT_PUBLIC_APP_URL` / `NEXT_PUBLIC_API_URL` | web | Public URLs for the web app |
-| `NEXT_PUBLIC_DEFAULT_LOCALE` | web | Default UI locale (`pt-BR` \| `en`) |
-| `NODE_ENV` | both | Runtime environment |
+| Variable | Scope | Session | Purpose |
+|---|---|---|---|
+| `DATABASE_URL` | api | 01 | Supabase Postgres connection string (`postgresql://…`) |
+| `JWT_SECRET` | api | 02 | Access token signing secret (min 32 chars) |
+| `JWT_REFRESH_SECRET` | api | 02 | Refresh token signing secret (min 32 chars, different value) |
+| `JWT_EXPIRES_IN` | api | 02 | Access token lifetime (`15m`) |
+| `JWT_REFRESH_EXPIRES_IN` | api | 02 | Refresh token lifetime (`7d`) |
+| `EMAIL_API_KEY` | api | 02 | Resend API key (`re_…`) |
+| `EMAIL_FROM` | api | 02 | Sender address (`noreply@yourdomain.com`) |
+| `APP_URL` | api | 02 | Allowed CORS origin + base URL for email links |
+| `API_PORT` | api | 01 | Fastify listen port (default `4000`) |
+| `NODE_ENV` | both | 01 | Runtime environment |
+| `STRIPE_SECRET_KEY` | api | 05 | Stripe server key |
+| `STRIPE_WEBHOOK_SECRET` | api | 05 | Stripe webhook signing secret |
+| `STRIPE_PUBLISHABLE_KEY` / `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` | web | 05 | Stripe client key |
+| `STORAGE_ENDPOINT` / `STORAGE_BUCKET` / `STORAGE_ACCESS_KEY` / `STORAGE_SECRET_KEY` | api | 03 | Object storage (Supabase Storage or R2) |
+| `AI_PROVIDER` / `AI_PROVIDER_API_KEY` | api | 08 | AI image provider switch + key (Replicate) |
+| `NEXT_PUBLIC_APP_URL` / `NEXT_PUBLIC_API_URL` | web | — | Public URLs for the web app |
+| `NEXT_PUBLIC_DEFAULT_LOCALE` | web | 10 | Default UI locale (`pt-BR` \| `en`) |
 
 ---
 
 ## Open Items / Known Issues
-- Currency support: USD, BRL, EUR — Stripe must be configured for multi-currency
+
+- `.turbo/` cache folder should be added to `.gitignore` (minor, non-blocking)
+- Storage provider (Supabase Storage vs Cloudflare R2) to be finalized in Session 03
+- Stripe multi-currency (USD, BRL, EUR) to be configured in Session 05
+- No frontend auth UI yet — login/register pages arrive in a future session
 - Free-tier first: all tooling choices must have a usable free tier at MVP
-- Scalability requirement: architecture must allow swapping to paid/robust tiers without major refactor
+- Architecture must allow swapping to paid/robust tiers without a major refactor
 
 ---
 
-## Last Updated — Session 01 complete [2026-06-18]
+## Last Updated — Session 02 complete [2026-06-19]

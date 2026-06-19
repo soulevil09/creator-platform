@@ -18,9 +18,31 @@ export type Locale = (typeof SUPPORTED_LOCALES)[number];
 export const DEFAULT_LOCALE: Locale = 'pt-BR';
 
 // ─── Roles ───────────────────────────────────────────────────────────────────
-/** Account roles used by RBAC (wired up in Session 02). */
+/** Account roles used by RBAC. */
 export const USER_ROLES = ['model', 'subscriber', 'admin'] as const;
 export type UserRole = (typeof USER_ROLES)[number];
+
+/**
+ * Canonical RBAC role type used across auth (Session 02). Mirrors `UserRole`;
+ * these are the lowercase API/JWT representation. The Prisma `Role` enum is the
+ * uppercase DB representation (ADMIN/MODEL/SUBSCRIBER) and is mapped at the
+ * persistence boundary in the API.
+ */
+export type Role = UserRole;
+
+/** Decoded JWT body for both access and refresh tokens. */
+export interface JwtPayload {
+  userId: string;
+  role: Role;
+}
+
+/** Authenticated user shape surfaced by the API (never includes secrets). */
+export interface AuthUser {
+  userId: string;
+  email: string;
+  role: Role;
+  displayName: string;
+}
 
 // ─── App metadata ────────────────────────────────────────────────────────────
 export const APP_NAME = 'Creator Platform';
