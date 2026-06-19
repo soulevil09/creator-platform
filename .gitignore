@@ -1,0 +1,65 @@
+# ================================
+# Variáveis de ambiente (CRÍTICO)
+# ================================
+.env
+.env.local
+.env.*.local
+.env.production
+apps/api/.env
+apps/web/.env.local
+
+# ================================
+# Dependências
+# ================================
+node_modules/
+.pnpm-store/
+
+# ================================
+# Build outputs
+# ================================
+dist/
+.next/
+out/
+build/
+
+# ================================
+# Prisma generated client
+# ================================
+prisma/generated/
+**/generated/client/
+
+# ================================
+# TypeScript incremental build info
+# ================================
+*.tsbuildinfo
+
+# ================================
+# Supabase local
+# ================================
+supabase/.branches/
+supabase/.temp/
+
+# ================================
+# Turborepo
+# ================================
+.turbo/
+
+# ================================
+# Logs
+# ================================
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# ================================
+# OS / Editor
+# ================================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ================================
+# Supabase snippets temporários
+supabase/snippets/
+# ================================

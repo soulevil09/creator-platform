@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.next/
+.turbo/
+**/generated/
+pnpm-lock.yaml
+
+# Authored docs / specs — keep their hand-formatting, don't let Prettier reflow.
+CLAUDE.md
+.claude/

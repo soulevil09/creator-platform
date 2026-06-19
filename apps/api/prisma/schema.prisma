@@ -1,0 +1,22 @@
+// =============================================================================
+// Prisma schema — Creator Platform
+//
+// Database: PostgreSQL on Supabase (managed free tier, no credit card needed).
+// ORM:      Prisma — TypeScript-first, generated type-safe client, first-class
+//           migrations, and an easy path to swap the DB provider later.
+//
+// No models yet — domain models are introduced from Session 02 onward.
+// This session only wires up the datasource and the client generator.
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+  // Generated client lives under prisma/generated/ (gitignored), keeping the
+  // committed tree free of generated code.
+  output   = "generated/client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}

@@ -1,0 +1,32 @@
+{
+  // ─────────────────────────────────────────────────────────────────────────
+  // Shared TypeScript base config for the whole monorepo.
+  // Each package extends this and overrides module/output settings as needed.
+  // strict: true is the non-negotiable foundation — every package inherits it.
+  // ─────────────────────────────────────────────────────────────────────────
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "declaration": true,
+    "baseUrl": ".",
+    "paths": {
+      "@shared/*": ["packages/shared/src/*"],
+      "@web/*": ["apps/web/src/*"],
+      "@api/*": ["apps/api/src/*"]
+    }
+  },
+  "exclude": ["node_modules", "dist", ".next", "**/generated/**"]
+}
