@@ -7,5 +7,11 @@ process.env.JWT_REFRESH_SECRET ??= 'test-refresh-secret-at-least-32-characters-l
 process.env.EMAIL_API_KEY ??= 're_test_key';
 process.env.APP_URL ??= 'http://localhost:3000';
 process.env.EMAIL_FROM ??= 'noreply@test.local';
+// Storage secrets validated eagerly by src/lib/env.ts. Tests inject an
+// in-memory StorageClient fake, so these never reach a real bucket.
+process.env.STORAGE_ENDPOINT ??= 'http://localhost:54321/storage/v1/s3';
+process.env.STORAGE_BUCKET ??= 'test-bucket';
+process.env.STORAGE_ACCESS_KEY ??= 'test-access-key';
+process.env.STORAGE_SECRET_KEY ??= 'test-secret-key';
 // A syntactically valid (but unused) connection string for PrismaClient ctor.
 process.env.DATABASE_URL ??= 'postgresql://user:pass@localhost:5432/testdb';

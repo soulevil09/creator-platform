@@ -44,6 +44,29 @@ export interface AuthUser {
   displayName: string;
 }
 
+// ─── Onboarding (Session 03) ─────────────────────────────────────────────────
+/** One uploaded reference image as surfaced by the API (signed URL is ephemeral). */
+export type ReferenceImageItem = {
+  imageId: string;
+  signedUrl: string;
+  mimeType: string;
+  sizeBytes: number;
+  createdAt: string;
+};
+
+/** Full model-onboarding profile returned by GET /api/onboarding/profile. */
+export type OnboardingProfileResponse = {
+  profileId: string;
+  displayName: string;
+  bio?: string;
+  country: string;
+  currency: Currency;
+  aiConsent: boolean;
+  aiConsentAt?: string;
+  tosAcceptedAt?: string;
+  referenceImages: ReferenceImageItem[];
+};
+
 // ─── App metadata ────────────────────────────────────────────────────────────
 export const APP_NAME = 'Creator Platform';
 

@@ -22,7 +22,7 @@ more robust/expensive services as revenue scales.
 | Backend | Fastify 5 | Lean, fast, low-overhead. Upgraded from v4 to v5 in Session 02 to align with plugin majors. |
 | ORM / DB | Prisma + PostgreSQL (Supabase) | Type-safe client, migrations, swappable provider. Supabase = managed free Postgres, no card. |
 | Auth | JWT (access 15m + refresh 7d) — httpOnly cookies, RBAC | Stateless, framework-agnostic, refresh-token rotation. Implemented in Session 02. |
-| Storage | Supabase Storage / Cloudflare R2 — _Session 03_ | Both have free tiers + signed URLs; choice finalized at Session 03. |
+| Storage | Supabase Storage (S3-compatible) | Finalized Session 03. Accessed via `@aws-sdk/client-s3` so the same code works against Cloudflare R2 / AWS S3 if swapped. Signed URLs via the presigner (local HMAC). |
 | Email | Resend | Free tier, simple API for transactional email. Active from Session 02. |
 | AI Images | Replicate (SDXL) — _Session 08_ | Pay-per-use, no subscription, hosted SDXL; swappable behind an `AI_PROVIDER` abstraction. |
 | Payments | Stripe | Subscriptions + PPV + Connect (model payouts). |
@@ -71,13 +71,32 @@ more robust/expensive services as revenue scales.
 
 ---
 
-### Session 03 — Model Onboarding ⏳ Pending
+### Session 03 — Model Onboarding ✅ Complete
 **File:** `.claude/sessions/session-03.md`  
 **Domain:** Model profile data, reference image upload, AI consent/ToS flow
 
-**External Prerequisites:**
-- [ ] Set up object storage: https://supabase.com/storage OR https://cloudflare.com/r2 → create bucket → copy endpoint, access key, secret key
-- [ ] (Optional) Cloudflare R2 free tier: https://dash.cloudflare.com → R2 → Create bucket
+**Summary:**
+- `ModelProfile` (1:1 with MODEL `User`) + `ReferenceImage` models added to Prisma; migration `20260620163515_add_model_profile` applied to Supabase
+- `apps/api/src/lib/storage.ts` — S3-compatible `StorageClient` (`uploadFile`/`getSignedUrl`/`deleteFile`) via `@aws-sdk/client-s3` + `@aws-sdk/s3-request-presigner`; provider-agnostic behind `STORAGE_*` env
+- `STORAGE_ENDPOINT/BUCKET/ACCESS_KEY/SECRET_KEY` added to `src/lib/env.ts` eager validation (+ `STORAGE_REGION` tunable); stubbed in `vitest.setup.ts`
+- Onboarding module (`src/modules/onboarding/`), all MODEL-only (`authenticate` + `authorize('model')`):
+  - `PUT /api/onboarding/profile` — upsert by userId, 201 create / 200 update, ToS stamping, 10/min
+  - `POST /api/onboarding/consent` — requires profile (404) + ToS accepted (400), sets `aiConsent`/`aiConsentAt`, 5/min
+  - `POST /api/onboarding/reference-images` — multipart, magic-byte + Content-Type match validation (`file-type`), 10 MB cap, max 10/model, 20/hour
+  - `DELETE /api/onboarding/reference-images/:imageId` — ownership-checked (403), 204
+  - `GET /api/onboarding/profile` — full profile + on-demand signed URLs (300s TTL), 404 if absent
+- `@fastify/multipart` registered globally (`attachFieldsToBody:false`, `throwFileSizeLimit:false`, 10 MB / 1 file)
+- Shared types `OnboardingProfileResponse` + `ReferenceImageItem` exported from `@creator-platform/shared`
+- Storage keys never leave the service — only short-TTL signed URLs; signed URLs never persisted
+- 21 new tests (38 total); `pnpm turbo run typecheck lint test` all green
+
+**Notes / deviations:**
+- Spec wrote `authorize('MODEL')`; the codebase RBAC role type is lowercase (`'model'`), mapped to the uppercase Prisma enum at the persistence boundary — used `authorize('model')` to match Session 02.
+- Storage keys generated with `crypto.randomUUID()` (no extra cuid dep): `reference-images/{userId}/{uuid}.{ext}`.
+- "ARIA validation" in the spec DoD is N/A — this session ships no frontend UI.
+
+**External Prerequisites (done):**
+- [x] Object storage configured: Supabase Storage S3 endpoint + access/secret keys in `apps/api/.env`
 
 ---
 
@@ -235,15 +254,21 @@ creator-platform/
 │       │   ├── lib/
 │       │   │   ├── env.ts           # Startup env validation (crash if secrets missing)
 │       │   │   ├── prisma.ts        # Singleton PrismaClient
-│       │   │   └── email.ts         # Resend emailer + Emailer interface
+│       │   │   ├── email.ts         # Resend emailer + Emailer interface
+│       │   │   └── storage.ts       # S3-compatible StorageClient (Supabase Storage)
 │       │   ├── middleware/
 │       │   │   └── auth.ts          # authenticate + authorize RBAC preHandler hooks
 │       │   ├── modules/
-│       │   │   └── auth/
-│       │   │       ├── auth.routes.ts   # HTTP layer: cookies, JWT signing, rate limits
-│       │   │       ├── auth.service.ts  # Business logic: register, login, refresh, logout
-│       │   │       ├── auth.schema.ts   # Zod validation schemas
-│       │   │       └── auth.test.ts     # 17 integration + unit tests
+│       │   │   ├── auth/
+│       │   │   │   ├── auth.routes.ts   # HTTP layer: cookies, JWT signing, rate limits
+│       │   │   │   ├── auth.service.ts  # Business logic: register, login, refresh, logout
+│       │   │   │   ├── auth.schema.ts   # Zod validation schemas
+│       │   │   │   └── auth.test.ts     # 17 integration + unit tests
+│       │   │   └── onboarding/
+│       │   │       ├── onboarding.routes.ts   # HTTP: multipart, magic-byte validation, rate limits
+│       │   │       ├── onboarding.service.ts  # Business logic: profile, consent, reference images
+│       │   │       ├── onboarding.schema.ts   # Zod validation schemas
+│       │   │       └── onboarding.test.ts     # 21 integration tests
 │       │   └── types/
 │       │       └── fastify-jwt.d.ts # Module augmentation for namespaced JWT decorators
 │       ├── prisma/
@@ -293,7 +318,8 @@ All `.env*` files are gitignored; examples contain placeholders only.
 | `STRIPE_SECRET_KEY` | api | 05 | Stripe server key |
 | `STRIPE_WEBHOOK_SECRET` | api | 05 | Stripe webhook signing secret |
 | `STRIPE_PUBLISHABLE_KEY` / `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` | web | 05 | Stripe client key |
-| `STORAGE_ENDPOINT` / `STORAGE_BUCKET` / `STORAGE_ACCESS_KEY` / `STORAGE_SECRET_KEY` | api | 03 | Object storage (Supabase Storage or R2) |
+| `STORAGE_ENDPOINT` / `STORAGE_BUCKET` / `STORAGE_ACCESS_KEY` / `STORAGE_SECRET_KEY` | api | 03 | Object storage (Supabase Storage S3 endpoint + S3 key pair) |
+| `STORAGE_REGION` | api | 03 | SigV4 signing region for S3 client (default `us-east-1`) |
 | `AI_PROVIDER` / `AI_PROVIDER_API_KEY` | api | 08 | AI image provider switch + key (Replicate) |
 | `NEXT_PUBLIC_APP_URL` / `NEXT_PUBLIC_API_URL` | web | — | Public URLs for the web app |
 | `NEXT_PUBLIC_DEFAULT_LOCALE` | web | 10 | Default UI locale (`pt-BR` \| `en`) |
@@ -303,7 +329,6 @@ All `.env*` files are gitignored; examples contain placeholders only.
 ## Open Items / Known Issues
 
 - `.turbo/` cache folder should be added to `.gitignore` (minor, non-blocking)
-- Storage provider (Supabase Storage vs Cloudflare R2) to be finalized in Session 03
 - Stripe multi-currency (USD, BRL, EUR) to be configured in Session 05
 - No frontend auth UI yet — login/register pages arrive in a future session
 - Free-tier first: all tooling choices must have a usable free tier at MVP
@@ -311,4 +336,4 @@ All `.env*` files are gitignored; examples contain placeholders only.
 
 ---
 
-## Last Updated — Session 02 complete [2026-06-19]
+## Last Updated — Session 03 complete [2026-06-20]

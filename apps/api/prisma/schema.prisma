@@ -6,6 +6,10 @@
 //           migrations, and an easy path to swap the DB provider later.
 //
 // Session 02 introduces the first domain model: User (auth + RBAC).
+// Session 03 adds model onboarding: ModelProfile (profile data, ToS + AI
+// likeness consent) and ReferenceImage (uploaded likeness references stored in
+// Supabase Storage; only the object key is persisted, signed URLs are minted
+// on demand and never written to the DB).
 // =============================================================================
 
 generator client {
@@ -43,6 +47,49 @@ model User {
   verifyToken          String?   @unique
   verifyTokenExpiresAt DateTime?
   refreshTokenHash     String?
+  modelProfile         ModelProfile?
   createdAt            DateTime  @default(now())
   updatedAt            DateTime  @updatedAt
+}
+
+// ─── ModelProfile ────────────────────────────────────────────────────────────
+// One-to-one with a MODEL User. Holds public profile data plus the two consent
+// timestamps that gate AI usage: `tosAcceptedAt` (must be set before consent)
+// and `aiConsentAt` (when the model granted likeness usage). Deleting the User
+// cascades the profile (and its reference images) away.
+model ModelProfile {
+  id              String    @id @default(cuid())
+  userId          String    @unique
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  displayName     String
+  bio             String?
+  country         String    // ISO 3166-1 alpha-2, e.g. "BR"
+  currency        String    @default("USD") // "USD" | "BRL" | "EUR"
+
+  aiConsent       Boolean   @default(false)
+  aiConsentAt     DateTime?
+  tosAcceptedAt   DateTime?
+
+  referenceImages ReferenceImage[]
+
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+}
+
+// ─── ReferenceImage ──────────────────────────────────────────────────────────
+// A likeness reference uploaded by a model. Only the Storage object key is
+// persisted; the signed URL is ephemeral (minted on demand, short TTL) and is
+// never stored. Capped at 10 per profile, enforced at the service layer.
+model ReferenceImage {
+  id             String       @id @default(cuid())
+  modelProfileId String
+  modelProfile   ModelProfile @relation(fields: [modelProfileId], references: [id], onDelete: Cascade)
+
+  storageKey     String       // Supabase Storage object key (path)
+  signedUrl      String?      // ephemeral; not persisted — generated on-demand
+  mimeType       String
+  sizeBytes      Int
+
+  createdAt      DateTime     @default(now())
 }
