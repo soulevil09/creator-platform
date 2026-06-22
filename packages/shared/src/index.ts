@@ -67,6 +67,45 @@ export type OnboardingProfileResponse = {
   referenceImages: ReferenceImageItem[];
 };
 
+// ─── Content (Session 04) ────────────────────────────────────────────────────
+/** Media kinds the platform stores. Mirrors the Prisma `ContentType` enum. */
+export const CONTENT_TYPES = ['IMAGE', 'VIDEO'] as const;
+export type ContentType = (typeof CONTENT_TYPES)[number];
+
+/** Visibility tiers. Mirrors the Prisma `ContentTier` enum. */
+export const CONTENT_TIERS = ['FREE', 'STANDARD', 'PREMIUM'] as const;
+export type ContentTier = (typeof CONTENT_TIERS)[number];
+
+/** Result of a successful upload (POST /api/content/upload). */
+export type ContentUploadResponse = {
+  contentId: string;
+  title: string;
+  tier: ContentTier;
+  type: ContentType;
+  isPublished: boolean;
+};
+
+/** One item in the model content listing (GET /api/content/model/:modelId). */
+export type ContentListItem = {
+  contentId: string;
+  title: string;
+  type: ContentType;
+  tier: ContentTier;
+  isPublished: boolean;
+  /** Signed thumbnail URL (≤300s TTL); null when the requester lacks access. */
+  thumbnailUrl: string | null;
+  hasAccess: boolean;
+  ppvPriceCents: number | null;
+  viewCount: number;
+  createdAt: string;
+};
+
+/** /serve response for videos (images stream raw watermarked bytes instead). */
+export type ContentVideoServeResponse = {
+  signedUrl: string;
+  expiresIn: number;
+};
+
 // ─── App metadata ────────────────────────────────────────────────────────────
 export const APP_NAME = 'Creator Platform';
 

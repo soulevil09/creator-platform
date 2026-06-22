@@ -186,6 +186,7 @@ function createFakeStorage() {
       async (_bucket: string, key: string, ttl: number) =>
         `https://signed.example/${key}?ttl=${ttl}`,
     ),
+    getObject: vi.fn(async (_bucket: string, _key: string) => Buffer.from('fake-object')),
     deleteFile: vi.fn(async (_bucket: string, key: string) => {
       deleted.push(key);
       uploaded.delete(key);

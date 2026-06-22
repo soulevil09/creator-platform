@@ -10,6 +10,11 @@
 // likeness consent) and ReferenceImage (uploaded likeness references stored in
 // Supabase Storage; only the object key is persisted, signed URLs are minted
 // on demand and never written to the DB).
+// Session 04 adds the content lifecycle: Content (monetizable media stored
+// behind short-lived signed URLs / on-the-fly watermarking — only the object
+// key is persisted, never exposed) and ContentAccess (per-user access grants,
+// the join that gates tier-based and PPV viewing; populated by Session 05's
+// Stripe webhooks).
 // =============================================================================
 
 generator client {
@@ -48,6 +53,8 @@ model User {
   verifyTokenExpiresAt DateTime?
   refreshTokenHash     String?
   modelProfile         ModelProfile?
+  uploadedContent      Content[]
+  contentAccesses      ContentAccess[]
   createdAt            DateTime  @default(now())
   updatedAt            DateTime  @updatedAt
 }
@@ -92,4 +99,72 @@ model ReferenceImage {
   sizeBytes      Int
 
   createdAt      DateTime     @default(now())
+}
+
+// ─── Content (Session 04) ────────────────────────────────────────────────────
+// Monetizable media uploaded by a MODEL. Only the Storage object key is
+// persisted — it is NEVER returned to a client. Media is delivered exclusively
+// via short-lived signed URLs (thumbnails) or on-the-fly watermarked byte
+// streams (the /serve endpoint), never a public/permanent URL. Soft-deleted via
+// `deletedAt` (a cleanup job removes the underlying object later, out of scope).
+enum ContentType {
+  IMAGE
+  VIDEO
+}
+
+// Visibility tier. FREE is a public teaser; STANDARD requires any active
+// subscription; PREMIUM requires the PREMIUM tier or an individual PPV unlock.
+enum ContentTier {
+  FREE
+  STANDARD
+  PREMIUM
+}
+
+model Content {
+  id            String      @id @default(cuid())
+  modelId       String
+  model         User        @relation(fields: [modelId], references: [id])
+  title         String
+  description   String?
+  type          ContentType
+  tier          ContentTier @default(STANDARD)
+  storageKey    String      // S3 key, never exposed externally
+  mimeType      String
+  sizeBytes     Int
+  width         Int?        // pixels, images only
+  height        Int?        // pixels, images only
+  durationSecs  Int?        // seconds, videos only (null at MVP — no ffprobe)
+  isPublished   Boolean     @default(false)
+  ppvPriceCents Int?        // null = not PPV; set = optional PPV add-on (Session 05)
+  viewCount     Int         @default(0)
+  deletedAt     DateTime?   // soft-delete tombstone; storage cleanup deferred
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  accesses      ContentAccess[]
+
+  @@index([modelId])
+  @@index([tier])
+  @@index([isPublished])
+}
+
+// ─── ContentAccess (Session 04) ──────────────────────────────────────────────
+// A per-user grant to view one Content item. `grantReason` records why access
+// was granted; `expiresAt` is null for permanent grants (PPV purchase) and set
+// for subscription-derived access (recalculated on renewal). The /serve and
+// list endpoints check `expiresAt` server-side on every request. Session 05's
+// Stripe webhook handler is the main writer (via grantContentAccess).
+model ContentAccess {
+  id          String    @id @default(cuid())
+  contentId   String
+  content     Content   @relation(fields: [contentId], references: [id])
+  userId      String
+  user        User      @relation(fields: [userId], references: [id])
+  grantReason String    // 'subscription_standard' | 'subscription_premium' | 'ppv_purchase' | 'model_owner' | 'admin'
+  grantedAt   DateTime  @default(now())
+  expiresAt   DateTime? // null = permanent (e.g. PPV); set for subscription-based
+
+  @@unique([contentId, userId])
+  @@index([userId])
+  @@index([contentId])
 }

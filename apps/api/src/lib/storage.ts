@@ -31,6 +31,12 @@ export interface StorageClient {
   uploadFile(bucket: string, key: string, buffer: Buffer, mimeType: string): Promise<string>;
   /** Mint a short-lived signed GET URL for an object. */
   getSignedUrl(bucket: string, key: string, expiresInSeconds: number): Promise<string>;
+  /**
+   * Fetch the full object body into a Buffer. Used by the content /serve
+   * endpoint to read raw image bytes for on-the-fly watermarking (Session 04) —
+   * the bytes are processed and streamed back, never re-uploaded or cached.
+   */
+  getObject(bucket: string, key: string): Promise<Buffer>;
   /** Delete an object. No-op if it does not exist. */
   deleteFile(bucket: string, key: string): Promise<void>;
 }
@@ -68,6 +74,17 @@ export function createS3StorageClient(): StorageClient {
       return presignS3Url(s3, new GetObjectCommand({ Bucket: bucket, Key: key }), {
         expiresIn: expiresInSeconds,
       });
+    },
+
+    async getObject(bucket, key) {
+      const res = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+      if (!res.Body) {
+        throw new Error(`Object not found: ${key}`);
+      }
+      // The SDK's Body is a Node Readable in this runtime; transformToByteArray
+      // (added on the SDK stream mixin) collects it without a manual pump.
+      const bytes = await res.Body.transformToByteArray();
+      return Buffer.from(bytes);
     },
 
     async deleteFile(bucket, key) {

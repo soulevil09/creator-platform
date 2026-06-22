@@ -100,13 +100,32 @@ more robust/expensive services as revenue scales.
 
 ---
 
-### Session 04 — Content Management ⏳ Pending
+### Session 04 — Content Management ✅ Complete
 **File:** `.claude/sessions/session-04.md`  
 **Domain:** Upload pipeline, signed URL serving, watermarking, tier-based access control
 
-**External Prerequisites:**
-- [ ] Storage bucket from Session 03 must be configured
-- [ ] Confirm storage provider choice (Supabase Storage or Cloudflare R2) is finalized
+**Summary:**
+- `Content` + `ContentAccess` models, `ContentType`/`ContentTier` enums, and `Content.deletedAt` soft-delete field added to Prisma; `User` gains `uploadedContent` / `contentAccesses` relations. Migration `20260621153750_add_content_management` applied to Supabase; client regenerated.
+- `StorageClient.getObject(bucket, key)` added — streams an S3 object to a Buffer (used by `/serve` for on-the-fly watermarking). Never re-uploaded/cached.
+- `apps/api/src/lib/image.ts` — injectable `ImageProcessor` (sharp-backed `createSharpImageProcessor`): `getDimensions` + `watermark` (SVG overlay, bottom-right, white @40% opacity + dark drop shadow, longest edge capped at 2048px). Wired into `buildServer` like storage/emailer so tests inject a fake and never load sharp's native binary.
+- Content module (`src/modules/content/`):
+  - `POST /api/content/upload` — MODEL-only, multipart, magic-byte + Content-Type match + declared-type cross-check (`file-type`), per-type caps (50 MB image / 500 MB video → 413), sharp dimensions for images, verified-model + profile gate (403), `content/{modelId}/{cuid2}.{ext}` key, 201, 20/model/hour. Per-call multipart `fileSize` override (500 MB) supersedes the global 10 MB cap.
+  - `PATCH /api/content/:contentId/publish` — MODEL-only, ownership-checked (403), toggles `isPublished`, 200.
+  - `GET /api/content/model/:modelId` — optional auth; FREE always listed, STANDARD/PREMIUM only when accessible (owner/admin/active grant); thumbnails are parallel signed URLs (300s TTL); `storageKey` never serialized.
+  - `GET /api/content/:contentId/serve` — `authenticate` required; access check (owner/admin/FREE/valid non-expired `ContentAccess`, PREMIUM needs premium/ppv grant) else 403; images streamed watermarked with `Cache-Control: no-store`; videos return a 60s signed URL; `viewCount` bumped fire-and-forget.
+  - `DELETE /api/content/:contentId` — MODEL or ADMIN; soft-delete (`deletedAt` + unpublish); 204; storage object left for a future cleanup job.
+  - `grantContentAccess` / `revokeContentAccess` service functions (upsert/deleteMany on `contentId+userId`) — used by `/serve` (owner audit) now, by Session 05's Stripe webhooks later.
+- Shared types `ContentType`, `ContentTier`, `ContentUploadResponse`, `ContentListItem`, `ContentVideoServeResponse` + `CONTENT_TYPES`/`CONTENT_TIERS` exported from `@creator-platform/shared`.
+- 15 new tests (53 total); `pnpm turbo run typecheck lint test` all green, zero regressions.
+
+**Notes / deviations:**
+- `/serve` allows FREE content to any authenticated user (FREE = public teaser), in addition to the spec's owner/admin/`ContentAccess` checks.
+- List endpoint returns gated tiers **only when accessible**, so `thumbnailUrl` is null only defensively (locked-teaser listing — showing inaccessible items with null thumbnails — is deferred). Anonymous requesters see FREE only.
+- Video duration/watermarking out of scope (no ffmpeg/ffprobe) — `durationSecs` stays null, video served via signed URL.
+- "ARIA validation" in the DoD is N/A — this session ships no frontend UI (same as Session 03).
+
+**External Prerequisites (done):**
+- [x] Storage bucket from Session 03 configured (Supabase Storage finalized as the provider)
 
 ---
 
@@ -233,7 +252,15 @@ _Session 02 — auth-specific decisions:_
 - **Resend** — transactional email via SDK (`resend` npm package); `Emailer` interface allows swapping providers without touching auth code.
 - **Startup env validation** — `src/lib/env.ts` validates required secrets eagerly at boot; process crashes with a clear error if any are missing (never fails silently at first request).
 
-**Swap-readiness notes:** DB provider swappable behind Prisma; AI provider behind `AI_PROVIDER` env switch; storage behind S3-compatible env vars; email provider behind the `Emailer` interface.
+_Session 04 — content-specific decisions:_
+
+- **`storageKey` is layer-private** — it never enters a response body, header, or error. Delivery is exclusively via short-TTL signed URLs (≤300s thumbnails, 60s video) or on-the-fly watermarked byte streams; the serve path streams bytes directly, not a signed URL.
+- **`ImageProcessor` interface (sharp-backed)** — image work sits behind an injectable interface like `StorageClient`/`Emailer`, so tests inject a fake and CI never loads sharp's native binary. Watermark is an SVG overlay (per-user: brand + email), images capped at 2048px before processing for the <500ms budget.
+- **Per-user watermark ⇒ `Cache-Control: no-store`** — watermarked images are unique per requester, so they must never be cached by browsers/proxies.
+- **Tier access via `ContentAccess` rows** — a `contentId+userId` join with `grantReason` + optional `expiresAt`, checked server-side on every serve/list. `grantContentAccess`/`revokeContentAccess` are the write primitives Session 05's Stripe webhooks will call.
+- **`cuid2` for storage keys** — collision-resistant content IDs in `content/{modelId}/{cuid2}.{ext}`.
+
+**Swap-readiness notes:** DB provider swappable behind Prisma; AI provider behind `AI_PROVIDER` env switch; storage behind S3-compatible env vars; email provider behind the `Emailer` interface; image processing behind the `ImageProcessor` interface.
 
 ---
 
@@ -255,7 +282,8 @@ creator-platform/
 │       │   │   ├── env.ts           # Startup env validation (crash if secrets missing)
 │       │   │   ├── prisma.ts        # Singleton PrismaClient
 │       │   │   ├── email.ts         # Resend emailer + Emailer interface
-│       │   │   └── storage.ts       # S3-compatible StorageClient (Supabase Storage)
+│       │   │   ├── storage.ts       # S3-compatible StorageClient (+ getObject)
+│       │   │   └── image.ts         # Injectable ImageProcessor (sharp): dims + watermark
 │       │   ├── middleware/
 │       │   │   └── auth.ts          # authenticate + authorize RBAC preHandler hooks
 │       │   ├── modules/
@@ -264,16 +292,21 @@ creator-platform/
 │       │   │   │   ├── auth.service.ts  # Business logic: register, login, refresh, logout
 │       │   │   │   ├── auth.schema.ts   # Zod validation schemas
 │       │   │   │   └── auth.test.ts     # 17 integration + unit tests
-│       │   │   └── onboarding/
-│       │   │       ├── onboarding.routes.ts   # HTTP: multipart, magic-byte validation, rate limits
-│       │   │       ├── onboarding.service.ts  # Business logic: profile, consent, reference images
-│       │   │       ├── onboarding.schema.ts   # Zod validation schemas
-│       │   │       └── onboarding.test.ts     # 21 integration tests
+│       │   │   ├── onboarding/
+│       │   │   │   ├── onboarding.routes.ts   # HTTP: multipart, magic-byte validation, rate limits
+│       │   │   │   ├── onboarding.service.ts  # Business logic: profile, consent, reference images
+│       │   │   │   ├── onboarding.schema.ts   # Zod validation schemas
+│       │   │   │   └── onboarding.test.ts     # 21 integration tests
+│       │   │   └── content/
+│       │   │       ├── content.routes.ts      # HTTP: multipart, size caps, serve/watermark, rate limits
+│       │   │       ├── content.service.ts     # Business logic: upload, access control, serve, grant/revoke
+│       │   │       ├── content.schema.ts      # Zod validation schemas
+│       │   │       └── content.test.ts        # 15 integration tests
 │       │   └── types/
 │       │       └── fastify-jwt.d.ts # Module augmentation for namespaced JWT decorators
 │       ├── prisma/
-│       │   ├── schema.prisma        # User model + Role enum
-│       │   ├── migrations/          # 20260619034002_add_user_model
+│       │   ├── schema.prisma        # User + ModelProfile + Content models, enums
+│       │   ├── migrations/          # …_add_user_model, …_add_model_profile, …_add_content_management
 │       │   └── generated/           # Prisma client output (gitignored)
 │       ├── scripts/
 │       │   └── postinstall.mjs      # Tolerant `prisma generate` wrapper
@@ -333,7 +366,11 @@ All `.env*` files are gitignored; examples contain placeholders only.
 - No frontend auth UI yet — login/register pages arrive in a future session
 - Free-tier first: all tooling choices must have a usable free tier at MVP
 - Architecture must allow swapping to paid/robust tiers without a major refactor
+- **Video watermarking out of scope** (Session 04) — no ffmpeg/ffprobe; videos are served via a 60s signed URL with no server-side watermark, and `Content.durationSecs` stays null. Harden in a later session.
+- **Content uploads buffer the full file into memory before storage write** (Session 04) — acceptable at MVP; true streaming needs the S3 multipart upload API (deferred).
+- **Soft-deleted content objects are left in storage** (Session 04) — a cleanup job to purge `deletedAt` rows' objects is deferred (Session 09/12 candidate).
+- **Locked-teaser listing deferred** (Session 04) — the list endpoint hides inaccessible gated content rather than returning it with a null thumbnail; revisit if the UI wants upsell teasers.
 
 ---
 
-## Last Updated — Session 03 complete [2026-06-20]
+## Last Updated — Session 04 complete [2026-06-21]

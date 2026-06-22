@@ -10,10 +10,13 @@ import { env } from './lib/env.js';
 import { prisma as defaultPrisma, type PrismaClient } from './lib/prisma.js';
 import { createResendEmailer, type Emailer } from './lib/email.js';
 import { createS3StorageClient, type StorageClient } from './lib/storage.js';
+import { createSharpImageProcessor, type ImageProcessor } from './lib/image.js';
 import { createAuthService } from './modules/auth/auth.service.js';
 import authRoutes from './modules/auth/auth.routes.js';
 import { createOnboardingService } from './modules/onboarding/onboarding.service.js';
 import onboardingRoutes from './modules/onboarding/onboarding.routes.js';
+import { createContentService } from './modules/content/content.service.js';
+import contentRoutes from './modules/content/content.routes.js';
 
 /** Max reference-image upload size, shared by the multipart limit (10 MB). */
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
@@ -27,12 +30,15 @@ export interface BuildServerOptions {
   emailer?: Emailer;
   /** Override the object-storage client (tests inject an in-memory fake). */
   storage?: StorageClient;
+  /** Override the image processor (tests inject a fake to avoid sharp's binary). */
+  images?: ImageProcessor;
 }
 
 export async function buildServer(opts: BuildServerOptions = {}) {
   const prisma = opts.prisma ?? defaultPrisma;
   const emailer = opts.emailer ?? createResendEmailer();
   const storage = opts.storage ?? createS3StorageClient();
+  const images = opts.images ?? createSharpImageProcessor();
 
   const app = Fastify({ logger: env.NODE_ENV !== 'test' });
 
@@ -90,6 +96,17 @@ export async function buildServer(opts: BuildServerOptions = {}) {
   await app.register(onboardingRoutes, {
     prefix: '/api/onboarding',
     service: onboardingService,
+  });
+
+  const contentService = createContentService({
+    prisma,
+    storage,
+    images,
+    bucket: env.STORAGE_BUCKET,
+  });
+  await app.register(contentRoutes, {
+    prefix: '/api/content',
+    service: contentService,
   });
 
   return app;
