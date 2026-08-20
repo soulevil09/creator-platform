@@ -1,10 +1,10 @@
 import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
-import { APP_NAME } from '@creator-platform/shared';
 
 export const metadata: Metadata = {
-  title: APP_NAME,
-  description: 'Content monetization with AI-powered image personalization.',
+  title: 'VisorFans — Plataforma de monetização para criadores de conteúdo',
+  description:
+    'Atendemos criadores digitais (modelos, influenciadores e artistas) e seus assinantes. Vendemos assinaturas mensais e pacotes de créditos digitais pelo nosso portal web.',
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

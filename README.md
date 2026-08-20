@@ -6,7 +6,7 @@ for preset options or custom prompts. A hidden system prompt anchors each model'
 every AI request. Built lean on free-tier/serverless tooling, with an architecture designed to swap
 in more robust paid services as revenue scales.
 
-- **Currencies:** USD, BRL, EUR (Stripe multi-currency)
+- **Currencies:** USD, BRL, EUR
 - **Languages:** PT-BR + EN (i18n-ready from day one)
 - **Repo:** https://github.com/soulevil09/creator-platform
 
@@ -24,8 +24,12 @@ in more robust paid services as revenue scales.
 | Lint     | **ESLint 9 (flat) + typescript-eslint** | Single flat config at the root governs every package; modern, fast, and the de-facto TS standard.                                                                                                                 | [ESLint](https://eslint.org)                                       |
 | Format   | **Prettier**                            | Zero-debate, consistent formatting across the whole repo.                                                                                                                                                         | [Prettier](https://prettier.io)                                    |
 | Tests    | **Vitest**                              | ESM- and TypeScript-native, Jest-compatible API, fast, and unified config — less friction than Jest in a TS/ESM monorepo. `--passWithNoTests` keeps CI green before tests exist.                                  | [Vitest](https://vitest.dev)                                       |
-| Payments | **Stripe**                              | Subscriptions + PPV + Connect (model payouts), multi-currency (USD/BRL/EUR).                                                                                                                                      | [Stripe](https://stripe.com)                                       |
+| Payments (PIX/BR)     | **Woovi (OpenPix)**   | Brazilian PIX gateway (CNPJ-backed, PCI DSS). Subscriptions + credit packs, real-time webhooks, 0.80%/tx. Provider-swappable behind `IPaymentProvider` (`WooviPixAdapter`).                                        | [Woovi](https://woovi.com)                                         |
+| Payments (crypto)     | **NOWPayments**       | 350+ cryptocurrencies + stablecoins (USDT/USDC), native recurring billing, 0.5%/tx. Adult content permitted by ToS. Swappable behind `IPaymentProvider` (`NOWPaymentsAdapter`).                                    | [NOWPayments](https://nowpayments.io)                             |
+| Payments (card)       | **CCBill — deferred** | Confirmed future card processor for international Visa/Mastercard. Deferred to post-MVP (annual high-risk network fees); scaffolded as `MockPaymentProvider` behind `IPaymentProvider` (`CCBillAdapter`).           | [CCBill](https://ccbill.com)                                       |
 | CI       | **GitHub Actions**                      | Free tier, native GitHub integration.                                                                                                                                                                             | [Actions](https://github.com/features/actions)                     |
+
+> ⚠️ **Stripe is permanently excluded** — it prohibits adult content, AI-generated adult images, and credit-based adult platforms. All Brazilian-based processors (PagBank, Pagar.me, Mercado Pago, etc.) are likewise incompatible. See `CLAUDE.md` for the full payment-stack rationale.
 
 ---
 
@@ -51,7 +55,7 @@ pnpm install
 cp .env.example .env                  # root
 cp apps/api/.env.example apps/api/.env
 cp apps/web/.env.example apps/web/.env.local
-# then fill in the values (DATABASE_URL, JWT secrets, Stripe keys, …)
+# then fill in the values (DATABASE_URL, JWT secrets, Woovi/NOWPayments keys, …)
 
 # 4. Run everything in dev
 pnpm dev
@@ -109,11 +113,11 @@ TypeScript runs in **strict mode** everywhere via `tsconfig.base.json`. Path ali
 | #   | Session                  | Status      | Domain                                                           |
 | --- | ------------------------ | ----------- | ---------------------------------------------------------------- |
 | 01  | Bootstrap                | ✅ Complete | Monorepo, TS config, CI skeleton, env, README, Prisma init       |
-| 02  | Auth                     | ⏳ Pending  | Registration (model/subscriber), login, JWT + refresh, RBAC      |
-| 03  | Model Onboarding         | ⏳ Pending  | Profile data, reference image upload, AI consent/ToS             |
-| 04  | Content Management       | ⏳ Pending  | Upload pipeline, signed URLs, watermarking, tiered access        |
-| 05  | Subscription & PPV       | ⏳ Pending  | Stripe subscriptions, PPV unlocking, webhooks                    |
-| 06  | Revenue Sharing          | ⏳ Pending  | Payout calc, model balances, Stripe Connect                      |
+| 02  | Auth                     | ✅ Complete | Registration (model/subscriber), login, JWT + refresh, RBAC      |
+| 03  | Model Onboarding         | ✅ Complete | Profile data, reference image upload, AI consent/ToS             |
+| 04  | Content Management       | ✅ Complete | Upload pipeline, signed URLs, watermarking, tiered access        |
+| 05  | Payments                 | ⏳ Pending  | Woovi PIX + NOWPayments crypto, IPaymentProvider, webhooks, wallet |
+| 06  | Revenue Sharing          | ⏳ Pending  | Payout calc, model balances, Paxum API mass payouts              |
 | 07  | Private Messaging        | ⏳ Pending  | Subscriber ↔ model chat (real-time/async)                        |
 | 08  | AI Image Personalization | ⏳ Pending  | Likeness anchor engine, hidden prompt, preset/custom UI, billing |
 | 09  | Anti-Leak & Protection   | ⏳ Pending  | Expiring signed URLs, screenshot deterrents, watermark hardening |
