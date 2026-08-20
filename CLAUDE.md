@@ -6,6 +6,7 @@ Models authorize use of their likeness for AI-generated personalized images. Sub
 options or custom prompts. A hidden system prompt anchors the model's likeness behind every AI request.
 
 **GitHub:** https://github.com/soulevil09/creator-platform  
+**Content category:** Adult (18+) — payment stack chosen accordingly (Stripe is permanently excluded)  
 **Supported currencies:** USD, BRL, EUR  
 **Base languages:** PT-BR, EN (i18n-ready)  
 **Budget philosophy:** Start lean with free-tier/serverless tools. Architecture must support swapping to
@@ -25,10 +26,66 @@ more robust/expensive services as revenue scales.
 | Storage | Supabase Storage (S3-compatible) | Finalized Session 03. Accessed via `@aws-sdk/client-s3` so the same code works against Cloudflare R2 / AWS S3 if swapped. Signed URLs via the presigner (local HMAC). |
 | Email | Resend | Free tier, simple API for transactional email. Active from Session 02. |
 | AI Images | Replicate (SDXL) — _Session 08_ | Pay-per-use, no subscription, hosted SDXL; swappable behind an `AI_PROVIDER` abstraction. |
-| Payments | Stripe | Subscriptions + PPV + Connect (model payouts). |
+| Payments (PIX/BR) | **Woovi (OpenPix)** | Brazilian fintech, CNPJ-backed, PCI DSS compliant. PIX nativo com liquidação imediata. Plano percentual: 0,80% por transação (mín R$0,50 / máx R$5,00). Zero setup/monthly fee. API REST documentada, webhooks em tempo real, SDK Node.js oficial. Conta PJ criada com MEI CNPJ 67.735.318/0001-91, chave PIX CNPJ vinculada ao Nubank PJ. |
+| Payments (crypto) | **NOWPayments** | 0.5% per transaction, zero setup/monthly fee. 350+ cryptocurrencies + stablecoins (USDT, USDC). Native subscription/recurring billing API. Adult content explicitly permitted by ToS. Forbes Advisor #1 crypto gateway 2025. Non-custodial option available. |
+| Payments (card — deferred) | _(CCBill — locked, post-MVP)_ | CCBill is the confirmed future card processor for international Visa/Mastercard. Requires Visa ($950/yr) + Mastercard ($500/yr) high-risk registration fees — deferred until platform generates enough revenue to absorb. Architecture is abstraction-ready on day one. |
+| Model payouts | Paxum mass payout REST API | Industry-standard for adult creator payouts. Automated weekly distribution via API. |
 | Lint / Format | ESLint 9 (flat) + Prettier | One root config governs all packages; modern TS standard. |
 | Tests | Vitest | ESM/TS-native, Jest-compatible, fast. In-memory mocks for DB + email in auth tests. |
 | CI | GitHub Actions | Free tier, native GitHub integration. |
+
+> ⚠️ **Stripe is permanently excluded** from this project. Stripe explicitly prohibits adult content, AI-generated adult images, and credit-based adult platforms. Any suggestion to use Stripe must be rejected.
+
+> ⚠️ **All Brazilian-based processors (PagBank, Pagar.me, Mercado Pago, Transfeera, OrendaPay, SyncPay, Kirvano) are incompatible** with adult content under Banco Central do Brasil and Visa/Mastercard network policies. Never suggest them.
+
+> 📋 **CCBill is the locked future card processor** — do not replace it with anything else when cards are activated. The $1,450/yr Visa+MC registration fee is a Visa/Mastercard network requirement, not CCBill-specific — it applies to any adult card processor.
+
+---
+
+## Revenue Model
+
+| Flow | Method | Notes |
+|---|---|---|
+| Subscriber pays monthly subscription | Woovi PIX (BR) or Crypto (NOWPayments) | Grants access to model's content tier |
+| Subscriber buys credit pack | Woovi PIX (BR) or Crypto (NOWPayments) | Credits deposited to subscriber wallet |
+| Subscriber spends credits | Internal debit (no new payment) | Triggers AI image generation |
+| Platform pays model | Paxum API (weekly) | Platform % kept; model % sent via mass payout |
+| _(Future)_ Subscriber pays via card | CCBill (post-MVP) | Activates when Visa/MC registration fees are sustainable |
+
+---
+
+## Payment Provider Abstraction
+
+All payment business logic is decoupled from provider-specific implementations via shared interfaces.
+**Every payment channel — PIX, crypto, and future card — must implement these interfaces.**
+Swapping any provider = swap the adapter only. Business logic never touches provider internals.
+
+```
+IPaymentProvider
+  ├── createSubscription(plan, user) → SubscriptionResult
+  ├── createCreditPurchase(pack, user) → ChargeResult
+  ├── cancelSubscription(subscriptionId) → void
+  └── handleWebhook(payload, signature) → PaymentEvent
+
+WooviPixAdapter      implements IPaymentProvider  ← PIX (BR market, via Woovi/OpenPix)
+NOWPaymentsAdapter   implements IPaymentProvider  ← Crypto (global, via NOWPayments)
+CCBillAdapter        implements IPaymentProvider  ← Card (deferred/mocked at MVP; activates post-MVP)
+
+IPayoutProvider
+  └── sendMassPayouts(recipients[]) → PayoutResult
+
+PaxumPayoutAdapter   implements IPayoutProvider   ← model earnings distribution
+
+MockPaymentProvider  implements IPaymentProvider  ← used in tests and for the deferred CCBill slot
+```
+
+Active providers at MVP:
+- `PAYMENT_PROVIDER_PIX=woovi` → `WooviPixAdapter`
+- `PAYMENT_PROVIDER_CRYPTO=nowpayments` → `NOWPaymentsAdapter`
+- `PAYMENT_PROVIDER_CARD=mock` → `MockPaymentProvider` (slot reserved for CCBill)
+
+The provider is selected at startup via env var and injected via the container. Business logic
+(credit wallet, subscription grants, revenue share) calls only the interface — never the adapter.
 
 ---
 
@@ -114,7 +171,7 @@ more robust/expensive services as revenue scales.
   - `GET /api/content/model/:modelId` — optional auth; FREE always listed, STANDARD/PREMIUM only when accessible (owner/admin/active grant); thumbnails are parallel signed URLs (300s TTL); `storageKey` never serialized.
   - `GET /api/content/:contentId/serve` — `authenticate` required; access check (owner/admin/FREE/valid non-expired `ContentAccess`, PREMIUM needs premium/ppv grant) else 403; images streamed watermarked with `Cache-Control: no-store`; videos return a 60s signed URL; `viewCount` bumped fire-and-forget.
   - `DELETE /api/content/:contentId` — MODEL or ADMIN; soft-delete (`deletedAt` + unpublish); 204; storage object left for a future cleanup job.
-  - `grantContentAccess` / `revokeContentAccess` service functions (upsert/deleteMany on `contentId+userId`) — used by `/serve` (owner audit) now, by Session 05's Stripe webhooks later.
+  - `grantContentAccess` / `revokeContentAccess` service functions (upsert/deleteMany on `contentId+userId`) — used by `/serve` (owner audit) now, by Session 05's payment webhooks later.
 - Shared types `ContentType`, `ContentTier`, `ContentUploadResponse`, `ContentListItem`, `ContentVideoServeResponse` + `CONTENT_TYPES`/`CONTENT_TIERS` exported from `@creator-platform/shared`.
 - 15 new tests (53 total); `pnpm turbo run typecheck lint test` all green, zero regressions.
 
@@ -129,29 +186,32 @@ more robust/expensive services as revenue scales.
 
 ---
 
-### Session 05 — Subscription & PPV ⏳ Pending
+### Session 05 — Payments ⏳ Pending
 **File:** `.claude/sessions/session-05.md`  
-**Domain:** Stripe subscription plans, PPV unlocking, webhook handling
+**Domain:** Woovi PIX (subscriptions + credit packs), NOWPayments crypto (subscriptions + credit packs), provider-swappable IPaymentProvider + IPayoutProvider abstractions, webhook handling, credit wallet, mocked CCBill slot
 
 **External Prerequisites:**
-- [ ] Create Stripe account: https://stripe.com → complete business profile
-- [ ] Enable test mode: https://dashboard.stripe.com/test/dashboard
-- [ ] Copy keys from: https://dashboard.stripe.com/test/apikeys → `STRIPE_SECRET_KEY`, `STRIPE_PUBLISHABLE_KEY`
-- [ ] Set up webhook endpoint: https://dashboard.stripe.com/test/webhooks → add endpoint → copy `STRIPE_WEBHOOK_SECRET`
-- [ ] Enable multi-currency (USD, BRL, EUR): https://dashboard.stripe.com/settings/currencies
-- [ ] Install Stripe CLI for local webhook testing: https://stripe.com/docs/stripe-cli
+- [x] MEI aberto — CNPJ 67.735.318/0001-91 ativo na Receita Federal
+- [x] Conta Nubank PJ criada — chave PIX CNPJ vinculada
+- [x] Conta Woovi (OpenPix) criada em app.woovi.com — empresa "Creator Platform", CNPJ 67.735.318/0001-91, plano percentual 0,80%
+  - [ ] Coletar `OPENPIX_APP_ID` no dashboard → API/Plugins
+  - [ ] Coletar `OPENPIX_WEBHOOK_SECRET` no dashboard → Webhooks → criar webhook
+- [ ] Criar conta NOWPayments: https://nowpayments.io → Sign Up
+  - [ ] Coletar `NOWPAYMENTS_API_KEY` em Store Settings
+  - [ ] Coletar `NOWPAYMENTS_IPN_SECRET` em IPN Settings
+  - [ ] Conectar carteira USDT TRC-20 em Payout Settings
 
 ---
 
 ### Session 06 — Revenue Sharing ⏳ Pending
 **File:** `.claude/sessions/session-06.md`  
-**Domain:** Payout calculation, model balance tracking, Stripe Connect
+**Domain:** Payout calculation, model balance tracking, Paxum API automated mass payouts
 
 **External Prerequisites:**
-- [ ] Stripe account must be active (from Session 05)
-- [ ] Enable Stripe Connect: https://dashboard.stripe.com/settings/connect → enable Standard or Express accounts
-- [ ] Complete Stripe platform profile for Connect: https://dashboard.stripe.com/settings/connect/profile
-- [ ] Copy `STRIPE_CONNECT_CLIENT_ID` from Connect settings
+- [ ] Create Paxum Business account: https://www.paxum.com → sign up as Business
+  - Enable mass payout API: contact Paxum support to activate REST API access
+  - Each model must also have a personal Paxum account (their email is used as payout recipient)
+  - Get `PAXUM_API_KEY` and `PAXUM_IPN_SECRET` from Merchant Services → IPN Settings
 
 ---
 
@@ -167,7 +227,7 @@ more robust/expensive services as revenue scales.
 
 ### Session 08 — AI Image Personalization ⏳ Pending
 **File:** `.claude/sessions/session-08.md`  
-**Domain:** Likeness anchor engine, hidden system prompt, preset + custom UI, billing
+**Domain:** Likeness anchor engine, hidden system prompt, preset + custom UI, credit deduction
 
 **External Prerequisites:**
 - [ ] Create Replicate account: https://replicate.com → sign up → go to https://replicate.com/account/api-tokens → generate token → copy `AI_PROVIDER_API_KEY`
@@ -257,10 +317,32 @@ _Session 04 — content-specific decisions:_
 - **`storageKey` is layer-private** — it never enters a response body, header, or error. Delivery is exclusively via short-TTL signed URLs (≤300s thumbnails, 60s video) or on-the-fly watermarked byte streams; the serve path streams bytes directly, not a signed URL.
 - **`ImageProcessor` interface (sharp-backed)** — image work sits behind an injectable interface like `StorageClient`/`Emailer`, so tests inject a fake and CI never loads sharp's native binary. Watermark is an SVG overlay (per-user: brand + email), images capped at 2048px before processing for the <500ms budget.
 - **Per-user watermark ⇒ `Cache-Control: no-store`** — watermarked images are unique per requester, so they must never be cached by browsers/proxies.
-- **Tier access via `ContentAccess` rows** — a `contentId+userId` join with `grantReason` + optional `expiresAt`, checked server-side on every serve/list. `grantContentAccess`/`revokeContentAccess` are the write primitives Session 05's Stripe webhooks will call.
+- **Tier access via `ContentAccess` rows** — a `contentId+userId` join with `grantReason` + optional `expiresAt`, checked server-side on every serve/list. `grantContentAccess`/`revokeContentAccess` are the write primitives Session 05's payment webhooks will call.
 - **`cuid2` for storage keys** — collision-resistant content IDs in `content/{modelId}/{cuid2}.{ext}`.
 
-**Swap-readiness notes:** DB provider swappable behind Prisma; AI provider behind `AI_PROVIDER` env switch; storage behind S3-compatible env vars; email provider behind the `Emailer` interface; image processing behind the `ImageProcessor` interface.
+_Pre-Session 05 — payment stack decisions (Stripe permanently excluded):_
+
+- **Stripe is off-limits** — Stripe explicitly prohibits adult content, AI-generated adult content, and credit-based adult platforms. Account terminations occur without warning. This is a hard, permanent constraint.
+
+- **All Brazilian-based processors are off-limits** — PagBank, Pagar.me, Mercado Pago, Transfeera, OrendaPay, SyncPay, Kirvano all operate under Banco Central do Brasil / Visa/Mastercard network policies that exclude adult content. Attempting to use them risks permanent account termination and MATCH list placement.
+
+- **Woovi (OpenPix) as PIX provider (MVP)** — Brazilian fintech with CNPJ verificável, PCI DSS compliant, API REST documentada com SDK Node.js oficial. Plano percentual: 0,80% por transação (mín R$0,50 / máx R$5,00), zero setup/monthly fee. Liquidação imediata na conta Nubank PJ vinculada. Conta criada com MEI CNPJ 67.735.318/0001-91. Webhooks em tempo real com validação de assinatura. Provider swap-ready via `WooviPixAdapter implements IPaymentProvider`.
+
+- **NOWPayments as crypto gateway (MVP)** — 0.5% service fee per transaction (1% with auto-conversion); zero setup/monthly fee. 350+ cryptocurrencies including USDT, USDC, BTC, ETH, SOL. Native recurring subscription API. Adult content explicitly permitted by ToS (prohibits only illegal/non-consensual material, not consensual adult entertainment). Forbes Advisor #1 crypto gateway 2025. 4.4/5 Trustpilot (850+ reviews). Non-custodial settlement available. Confirmed operational in iGaming and adult verticals.
+
+- **CCBill as future card processor (deferred, post-MVP)** — CCBill is the confirmed and locked card processor for international Visa/Mastercard when the platform is ready. The deferral reason is purely financial: Visa ($950/yr) + Mastercard ($500/yr) = $1,450/yr in mandatory high-risk registration fees imposed by the card networks themselves (not CCBill-specific — every adult card processor passes these fees). When MVP revenue justifies this cost, CCBill activation requires: merchant account application (3–7 days approval), plus `CCBILL_ACCOUNT_NUMBER`, `CCBILL_SUBACCOUNT`, `CCBILL_SALT`, `CCBILL_API_USERNAME`, `CCBILL_API_PASSWORD`. The `CCBillAdapter` implementing `IPaymentProvider` is scaffolded but mocked at MVP. **Do not replace CCBill with any other card processor without explicit approval.**
+
+- **MCC miscoding risk** — operating adult content under a non-adult MCC (e.g., 7372 SaaS, 7375 data services) to avoid high-risk fees constitutes transaction laundering. This risks permanent MATCH list placement, which bars the business from all major card processors for up to 5 years. The platform's actual content scope must drive MCC selection.
+
+- **"Token domain" anti-pattern rejected** — creating a separate domain/company to sell payment tokens and use them on the adult platform was evaluated and rejected. This structure constitutes transaction laundering, violates processor ToS, and risks permanent blacklisting across all processors.
+
+- **Telegram Stars — secondary/optional channel** — Stars can be used for low-ticket microtransactions (tips, supplementary credits) on Telegram bots/channels. Not a primary revenue stream due to: ~32% effective fee on mobile purchases (30% Apple/Google + ~2-3% Fragment); 21-day hold before withdrawal; 1,000 Stars minimum withdrawal; iOS filtering of explicit content by App Store policy; withdrawal goes to TON cryptocurrency (requires exchange → fiat). Integrate only as a supplementary channel if there is an active Telegram community.
+
+- **IPaymentProvider + IPayoutProvider abstractions** — all three payment channels (PIX, crypto, card) implement `IPaymentProvider`. The active provider per channel is selected at startup via env var. Business logic (credit wallet, subscription grants, revenue share) calls only the interface. Swapping a provider = swap the adapter class only.
+
+- **Credit wallet model** — credits are an internal currency. `CreditWallet` table tracks balance per user. Purchase (Woovi PIX webhook / NOWPayments IPN) → credit balance up. AI image generation → credit balance down. No payment triggered at generation time. Subscription grants → `ContentAccess` rows via `grantContentAccess`.
+
+**Swap-readiness notes:** DB provider swappable behind Prisma; AI provider behind `AI_PROVIDER` env switch; storage behind S3-compatible env vars; email provider behind the `Emailer` interface; image processing behind the `ImageProcessor` interface; PIX payment provider behind `IPaymentProvider` (`PAYMENT_PROVIDER_PIX` env); crypto payment provider behind `IPaymentProvider` (`PAYMENT_PROVIDER_CRYPTO` env); card payment provider behind `IPaymentProvider` (`PAYMENT_PROVIDER_CARD` env, mocked until CCBill activation); payout provider behind `IPayoutProvider`.
 
 ---
 
@@ -288,43 +370,43 @@ creator-platform/
 │       │   │   └── auth.ts          # authenticate + authorize RBAC preHandler hooks
 │       │   ├── modules/
 │       │   │   ├── auth/
-│       │   │   │   ├── auth.routes.ts   # HTTP layer: cookies, JWT signing, rate limits
-│       │   │   │   ├── auth.service.ts  # Business logic: register, login, refresh, logout
-│       │   │   │   ├── auth.schema.ts   # Zod validation schemas
-│       │   │   │   └── auth.test.ts     # 17 integration + unit tests
+│       │   │   │   ├── auth.routes.ts
+│       │   │   │   ├── auth.service.ts
+│       │   │   │   ├── auth.schema.ts
+│       │   │   │   └── auth.test.ts     # 17 tests
 │       │   │   ├── onboarding/
-│       │   │   │   ├── onboarding.routes.ts   # HTTP: multipart, magic-byte validation, rate limits
-│       │   │   │   ├── onboarding.service.ts  # Business logic: profile, consent, reference images
-│       │   │   │   ├── onboarding.schema.ts   # Zod validation schemas
-│       │   │   │   └── onboarding.test.ts     # 21 integration tests
+│       │   │   │   ├── onboarding.routes.ts
+│       │   │   │   ├── onboarding.service.ts
+│       │   │   │   ├── onboarding.schema.ts
+│       │   │   │   └── onboarding.test.ts   # 21 tests
 │       │   │   └── content/
-│       │   │       ├── content.routes.ts      # HTTP: multipart, size caps, serve/watermark, rate limits
-│       │   │       ├── content.service.ts     # Business logic: upload, access control, serve, grant/revoke
-│       │   │       ├── content.schema.ts      # Zod validation schemas
-│       │   │       └── content.test.ts        # 15 integration tests
+│       │   │       ├── content.routes.ts
+│       │   │       ├── content.service.ts
+│       │   │       ├── content.schema.ts
+│       │   │       └── content.test.ts      # 15 tests
 │       │   └── types/
-│       │       └── fastify-jwt.d.ts # Module augmentation for namespaced JWT decorators
+│       │       └── fastify-jwt.d.ts
 │       ├── prisma/
 │       │   ├── schema.prisma        # User + ModelProfile + Content models, enums
 │       │   ├── migrations/          # …_add_user_model, …_add_model_profile, …_add_content_management
 │       │   └── generated/           # Prisma client output (gitignored)
 │       ├── scripts/
-│       │   └── postinstall.mjs      # Tolerant `prisma generate` wrapper
+│       │   └── postinstall.mjs
 │       ├── vitest.config.ts
-│       ├── vitest.setup.ts          # Test env + secret stubs
+│       ├── vitest.setup.ts
 │       ├── tsconfig.json
 │       └── .env.example
 ├── packages/
 │   └── shared/                      # Framework-free types/constants/utils
 │       └── src/index.ts             # Role, JwtPayload, AuthUser + locale/currency constants
-├── .github/workflows/ci.yml         # lint + typecheck + test (parallel jobs)
-├── .claude/sessions/                # Session specs (session-01.md, session-02.md …)
-├── tsconfig.base.json               # strict TS base extended by every package
-├── turbo.json                       # Task pipeline + caching
-├── eslint.config.mjs                # Flat ESLint config for the whole repo
+├── .github/workflows/ci.yml
+├── .claude/sessions/
+├── tsconfig.base.json
+├── turbo.json
+├── eslint.config.mjs
 ├── .prettierrc / .prettierignore
 ├── pnpm-workspace.yaml
-├── .env.example                     # Root env template
+├── .env.example
 ├── CLAUDE.md
 └── README.md
 ```
@@ -338,7 +420,7 @@ All `.env*` files are gitignored; examples contain placeholders only.
 
 | Variable | Scope | Session | Purpose |
 |---|---|---|---|
-| `DATABASE_URL` | api | 01 | Supabase Postgres connection string (`postgresql://…`) |
+| `DATABASE_URL` | api | 01 | Supabase Postgres connection string |
 | `JWT_SECRET` | api | 02 | Access token signing secret (min 32 chars) |
 | `JWT_REFRESH_SECRET` | api | 02 | Refresh token signing secret (min 32 chars, different value) |
 | `JWT_EXPIRES_IN` | api | 02 | Access token lifetime (`15m`) |
@@ -348,11 +430,22 @@ All `.env*` files are gitignored; examples contain placeholders only.
 | `APP_URL` | api | 02 | Allowed CORS origin + base URL for email links |
 | `API_PORT` | api | 01 | Fastify listen port (default `4000`) |
 | `NODE_ENV` | both | 01 | Runtime environment |
-| `STRIPE_SECRET_KEY` | api | 05 | Stripe server key |
-| `STRIPE_WEBHOOK_SECRET` | api | 05 | Stripe webhook signing secret |
-| `STRIPE_PUBLISHABLE_KEY` / `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` | web | 05 | Stripe client key |
-| `STORAGE_ENDPOINT` / `STORAGE_BUCKET` / `STORAGE_ACCESS_KEY` / `STORAGE_SECRET_KEY` | api | 03 | Object storage (Supabase Storage S3 endpoint + S3 key pair) |
-| `STORAGE_REGION` | api | 03 | SigV4 signing region for S3 client (default `us-east-1`) |
+| `STORAGE_ENDPOINT` / `STORAGE_BUCKET` / `STORAGE_ACCESS_KEY` / `STORAGE_SECRET_KEY` | api | 03 | Object storage |
+| `STORAGE_REGION` | api | 03 | SigV4 signing region (default `us-east-1`) |
+| `PAYMENT_PROVIDER_PIX` | api | 05 | Active PIX adapter: `woovi` |
+| `OPENPIX_APP_ID` | api | 05 | Woovi (OpenPix) App ID — Dashboard → API/Plugins |
+| `OPENPIX_WEBHOOK_SECRET` | api | 05 | Woovi webhook signature secret — Dashboard → Webhooks |
+| `PAYMENT_PROVIDER_CRYPTO` | api | 05 | Active crypto adapter: `nowpayments` |
+| `NOWPAYMENTS_API_KEY` | api | 05 | NOWPayments API key |
+| `NOWPAYMENTS_IPN_SECRET` | api | 05 | NOWPayments IPN (webhook) secret |
+| `PAYMENT_PROVIDER_CARD` | api | 05 | Active card adapter: `mock` (CCBill when activated post-MVP) |
+| `CCBILL_ACCOUNT_NUMBER` | api | _post-MVP_ | CCBill main account number (6-digit) — deferred |
+| `CCBILL_SUBACCOUNT` | api | _post-MVP_ | CCBill subaccount number (4-digit) — deferred |
+| `CCBILL_SALT` | api | _post-MVP_ | CCBill webhook HMAC salt — deferred |
+| `CCBILL_API_USERNAME` | api | _post-MVP_ | CCBill REST API username — deferred |
+| `CCBILL_API_PASSWORD` | api | _post-MVP_ | CCBill REST API password — deferred |
+| `PAXUM_API_KEY` | api | 06 | Paxum REST API key for mass payouts |
+| `PAXUM_IPN_SECRET` | api | 06 | Paxum IPN shared secret for webhook validation |
 | `AI_PROVIDER` / `AI_PROVIDER_API_KEY` | api | 08 | AI image provider switch + key (Replicate) |
 | `NEXT_PUBLIC_APP_URL` / `NEXT_PUBLIC_API_URL` | web | — | Public URLs for the web app |
 | `NEXT_PUBLIC_DEFAULT_LOCALE` | web | 10 | Default UI locale (`pt-BR` \| `en`) |
@@ -362,15 +455,21 @@ All `.env*` files are gitignored; examples contain placeholders only.
 ## Open Items / Known Issues
 
 - `.turbo/` cache folder should be added to `.gitignore` (minor, non-blocking)
-- Stripe multi-currency (USD, BRL, EUR) to be configured in Session 05
 - No frontend auth UI yet — login/register pages arrive in a future session
 - Free-tier first: all tooling choices must have a usable free tier at MVP
 - Architecture must allow swapping to paid/robust tiers without a major refactor
-- **Video watermarking out of scope** (Session 04) — no ffmpeg/ffprobe; videos are served via a 60s signed URL with no server-side watermark, and `Content.durationSecs` stays null. Harden in a later session.
+- **Video watermarking out of scope** (Session 04) — no ffmpeg/ffprobe; videos are served via a 60s signed URL with no server-side watermark. Harden in Session 09.
 - **Content uploads buffer the full file into memory before storage write** (Session 04) — acceptable at MVP; true streaming needs the S3 multipart upload API (deferred).
 - **Soft-deleted content objects are left in storage** (Session 04) — a cleanup job to purge `deletedAt` rows' objects is deferred (Session 09/12 candidate).
 - **Locked-teaser listing deferred** (Session 04) — the list endpoint hides inaccessible gated content rather than returning it with a null thumbnail; revisit if the UI wants upsell teasers.
+- **Woovi adult content policy** — Woovi/OpenPix é um gateway PIX brasileiro regulado. Antes de ir ao ar em produção com conteúdo explícito adulto, confirmar com o suporte deles (suporte@woovi.com) se aceitam plataformas adult 18+. PIX em si não tem restrição de conteúdo (é infraestrutura do Banco Central), mas o gateway pode ter política própria.
+- **CCBill deferred to post-MVP** — $1,450/yr Visa+MC registration fees make card processing financially unviable at MVP stage. CCBill slot is scaffolded as `MockPaymentProvider`. Activate when monthly revenue covers the annual fee.
+- **NOWPayments crypto-to-fiat conversion** — NOWPayments settles in cryptocurrency. To receive BRL/USD fiat, platform must maintain exchange accounts (Bybit/OKX/Binance) and execute regular USDT→fiat withdrawals. This is an operational step outside the codebase.
+- **Lei FELCA compliance (Brazil)** — Lei 15.211/2025 requires adult platforms to implement CPF + Face ID age verification by 17/03/2026. Penalties: up to R$50M or 10% of annual Brazil revenue. Must be scoped into a future session (candidate: Session 09 or a new Session 9.5). ANPD is the enforcement authority.
+- **Paxum → Woovi/NOWPayments wire** — model payouts via Paxum require platform to accumulate earnings from Woovi and NOWPayments, then fund the Paxum business account. This is a manual treasury step outside the codebase; document the SOP before Session 06.
+- **MEI faturamento limit** — MEI CNPJ 67.735.318/0001-91 has R$130k/year revenue cap. When platform revenue approaches this threshold, migrate to ME (Microempresa) with a contador. This unlocks higher volume and formal payroll if needed.
+- **Telegram Stars** — optional secondary channel for microtransactions on Telegram bots. ~32% effective fee on mobile purchases. 21-day withdrawal hold. iOS restrictions on adult content via Stars. Not a primary payment channel — integrate only if there is an active Telegram community.
 
 ---
 
-## Last Updated — Session 04 complete [2026-06-21]
+## Last Updated — Session 04 complete / PIX provider updated to Woovi (OpenPix) — MEI CNPJ 67.735.318/0001-91 + Nubank PJ + Woovi conta criada [2026-06-29]
