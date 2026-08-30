@@ -116,7 +116,7 @@ TypeScript runs in **strict mode** everywhere via `tsconfig.base.json`. Path ali
 | 02  | Auth                     | ✅ Complete | Registration (model/subscriber), login, JWT + refresh, RBAC      |
 | 03  | Model Onboarding         | ✅ Complete | Profile data, reference image upload, AI consent/ToS             |
 | 04  | Content Management       | ✅ Complete | Upload pipeline, signed URLs, watermarking, tiered access        |
-| 05  | Payments                 | ⏳ Pending  | Woovi PIX + NOWPayments crypto, IPaymentProvider, webhooks, wallet |
+| 05  | Payments                 | ✅ Complete | Woovi PIX + NOWPayments crypto, IPaymentProvider, webhooks, wallet |
 | 06  | Revenue Sharing          | ⏳ Pending  | Payout calc, model balances, Paxum API mass payouts              |
 | 07  | Private Messaging        | ⏳ Pending  | Subscriber ↔ model chat (real-time/async)                        |
 | 08  | AI Image Personalization | ⏳ Pending  | Likeness anchor engine, hidden prompt, preset/custom UI, billing |

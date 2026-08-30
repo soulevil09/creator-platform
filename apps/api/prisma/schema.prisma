@@ -14,7 +14,9 @@
 // behind short-lived signed URLs / on-the-fly watermarking — only the object
 // key is persisted, never exposed) and ContentAccess (per-user access grants,
 // the join that gates tier-based and PPV viewing; populated by Session 05's
-// Stripe webhooks).
+// payment webhooks).
+// Session 05 adds the payments domain: Subscription, CreditWallet,
+// PaymentTransaction (idempotency-keyed) and AuditLog.
 // =============================================================================
 
 generator client {
@@ -43,20 +45,27 @@ enum Role {
 // sessions. The email verification token is a one-time random value (not a
 // secret key) and is stored in plain text with a 24h expiry.
 model User {
-  id                   String    @id @default(cuid())
-  email                String    @unique
+  id                   String          @id @default(cuid())
+  email                String          @unique
   passwordHash         String
-  role                 Role      @default(SUBSCRIBER)
+  role                 Role            @default(SUBSCRIBER)
   displayName          String
-  isVerified           Boolean   @default(false)
-  verifyToken          String?   @unique
+  isVerified           Boolean         @default(false)
+  verifyToken          String?         @unique
   verifyTokenExpiresAt DateTime?
   refreshTokenHash     String?
   modelProfile         ModelProfile?
   uploadedContent      Content[]
   contentAccesses      ContentAccess[]
-  createdAt            DateTime  @default(now())
-  updatedAt            DateTime  @updatedAt
+
+  // Payments (Session 05)
+  creditWallet        CreditWallet?
+  paymentTransactions PaymentTransaction[]
+  subscriptions       Subscription[]       @relation("SubscriberSubscriptions")
+  subscribers         Subscription[]       @relation("ModelSubscribers")
+  auditLogs           AuditLog[]
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
 }
 
 // ─── ModelProfile ────────────────────────────────────────────────────────────
@@ -65,23 +74,23 @@ model User {
 // and `aiConsentAt` (when the model granted likeness usage). Deleting the User
 // cascades the profile (and its reference images) away.
 model ModelProfile {
-  id              String    @id @default(cuid())
-  userId          String    @unique
-  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  displayName     String
-  bio             String?
-  country         String    // ISO 3166-1 alpha-2, e.g. "BR"
-  currency        String    @default("USD") // "USD" | "BRL" | "EUR"
+  displayName String
+  bio         String?
+  country     String // ISO 3166-1 alpha-2, e.g. "BR"
+  currency    String  @default("USD") // "USD" | "BRL" | "EUR"
 
-  aiConsent       Boolean   @default(false)
-  aiConsentAt     DateTime?
-  tosAcceptedAt   DateTime?
+  aiConsent     Boolean   @default(false)
+  aiConsentAt   DateTime?
+  tosAcceptedAt DateTime?
 
   referenceImages ReferenceImage[]
 
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 // ─── ReferenceImage ──────────────────────────────────────────────────────────
@@ -93,12 +102,12 @@ model ReferenceImage {
   modelProfileId String
   modelProfile   ModelProfile @relation(fields: [modelProfileId], references: [id], onDelete: Cascade)
 
-  storageKey     String       // Supabase Storage object key (path)
-  signedUrl      String?      // ephemeral; not persisted — generated on-demand
-  mimeType       String
-  sizeBytes      Int
+  storageKey String // Supabase Storage object key (path)
+  signedUrl  String? // ephemeral; not persisted — generated on-demand
+  mimeType   String
+  sizeBytes  Int
 
-  createdAt      DateTime     @default(now())
+  createdAt DateTime @default(now())
 }
 
 // ─── Content (Session 04) ────────────────────────────────────────────────────
@@ -128,20 +137,20 @@ model Content {
   description   String?
   type          ContentType
   tier          ContentTier @default(STANDARD)
-  storageKey    String      // S3 key, never exposed externally
+  storageKey    String // S3 key, never exposed externally
   mimeType      String
   sizeBytes     Int
-  width         Int?        // pixels, images only
-  height        Int?        // pixels, images only
-  durationSecs  Int?        // seconds, videos only (null at MVP — no ffprobe)
+  width         Int? // pixels, images only
+  height        Int? // pixels, images only
+  durationSecs  Int? // seconds, videos only (null at MVP — no ffprobe)
   isPublished   Boolean     @default(false)
-  ppvPriceCents Int?        // null = not PPV; set = optional PPV add-on (Session 05)
+  ppvPriceCents Int? // null = not PPV; set = optional PPV add-on
   viewCount     Int         @default(0)
-  deletedAt     DateTime?   // soft-delete tombstone; storage cleanup deferred
+  deletedAt     DateTime? // soft-delete tombstone; storage cleanup deferred
   createdAt     DateTime    @default(now())
   updatedAt     DateTime    @updatedAt
 
-  accesses      ContentAccess[]
+  accesses ContentAccess[]
 
   @@index([modelId])
   @@index([tier])
@@ -153,18 +162,151 @@ model Content {
 // was granted; `expiresAt` is null for permanent grants (PPV purchase) and set
 // for subscription-derived access (recalculated on renewal). The /serve and
 // list endpoints check `expiresAt` server-side on every request. Session 05's
-// Stripe webhook handler is the main writer (via grantContentAccess).
+// Woovi/NOWPayments webhook handler is the main writer (via grantContentAccess).
 model ContentAccess {
   id          String    @id @default(cuid())
   contentId   String
   content     Content   @relation(fields: [contentId], references: [id])
   userId      String
   user        User      @relation(fields: [userId], references: [id])
-  grantReason String    // 'subscription_standard' | 'subscription_premium' | 'ppv_purchase' | 'model_owner' | 'admin'
+  grantReason String // 'subscription_standard' | 'subscription_premium' | 'ppv_purchase' | 'model_owner' | 'admin'
   grantedAt   DateTime  @default(now())
   expiresAt   DateTime? // null = permanent (e.g. PPV); set for subscription-based
 
   @@unique([contentId, userId])
   @@index([userId])
   @@index([contentId])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Payments domain (Session 05)
+//
+// Provider-agnostic by design: every row records which provider produced it
+// (`PaymentProvider`), but no provider-specific column exists — swapping an
+// adapter never requires a migration. Money is stored in **minor units**
+// (centavos/cents) as integers; floats never touch a balance.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Payment channel providers. CCBILL_MOCK is the deferred card slot, served by
+/// MockPaymentProvider until CCBill is activated post-MVP.
+enum PaymentProvider {
+  WOOVI
+  NOWPAYMENTS
+  CCBILL_MOCK
+}
+
+enum PaymentTransactionType {
+  SUBSCRIPTION
+  CREDIT_PACK
+}
+
+enum PaymentStatus {
+  PENDING
+  CONFIRMED
+  FAILED
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELED
+  PAST_DUE
+  EXPIRED
+}
+
+// ─── Subscription ────────────────────────────────────────────────────────────
+// A subscriber's recurring access to one model's tier. One row per
+// (subscriber, model) pair — renewals push `currentPeriodEnd` forward and a
+// tier change updates the same row rather than creating a second one.
+model Subscription {
+  id           String @id @default(cuid())
+  subscriberId String
+  subscriber   User   @relation("SubscriberSubscriptions", fields: [subscriberId], references: [id], onDelete: Cascade)
+  modelId      String
+  model        User   @relation("ModelSubscribers", fields: [modelId], references: [id], onDelete: Cascade)
+
+  tier                   ContentTier // STANDARD | PREMIUM (FREE is never sold)
+  status                 SubscriptionStatus @default(ACTIVE)
+  provider               PaymentProvider
+  providerSubscriptionId String? // provider-side recurrence handle (null until the provider registers one)
+  currentPeriodEnd       DateTime
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([subscriberId, modelId])
+  @@index([modelId])
+  @@index([status])
+}
+
+// ─── CreditWallet ────────────────────────────────────────────────────────────
+// Internal currency, one wallet per user. `balance` is a whole number of
+// credits and must never go negative — enforced by a CHECK constraint in the
+// migration plus a conditional decrement (`balance >= amount`) in the service,
+// so an under-funded debit updates zero rows instead of mutating partially.
+model CreditWallet {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  balance   Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ─── PaymentTransaction ──────────────────────────────────────────────────────
+// One financial intent. Created PENDING at checkout, flipped to CONFIRMED (or
+// FAILED) by the provider webhook.
+//
+// `idempotencyKey` is generated locally at checkout and handed to the provider
+// as its correlation/order id, so the webhook echoes it back. The UNIQUE index
+// on it is the source of truth for webhook idempotency: confirmation is a
+// conditional update (`WHERE idempotencyKey = ? AND status = 'PENDING'`), so a
+// replayed delivery matches zero rows and cannot double-credit.
+model PaymentTransaction {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type                  PaymentTransactionType
+  provider              PaymentProvider
+  providerTransactionId String? // filled in when the webhook confirms
+  idempotencyKey        String                 @unique
+
+  amount         Int // minor units (centavos/cents)
+  currency       String // "BRL" | "USD" | "EUR"
+  creditsGranted Int? // CREDIT_PACK only
+
+  // SUBSCRIPTION only — which model/tier this charge buys.
+  modelId String?
+  tier    ContentTier?
+
+  status      PaymentStatus @default(PENDING)
+  confirmedAt DateTime?
+  metadata    Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([status])
+  @@index([providerTransactionId])
+}
+
+// ─── AuditLog ────────────────────────────────────────────────────────────────
+// Append-only trail for every state-changing financial operation. `actorId` is
+// null for system/provider-triggered events (webhooks), which is why the
+// relation is optional and set null on user deletion — the trail outlives the
+// account.
+model AuditLog {
+  id        String   @id @default(cuid())
+  actorId   String?
+  actor     User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  action    String // e.g. "payment.charge_created", "wallet.credited"
+  entity    String // e.g. "PaymentTransaction", "CreditWallet"
+  entityId  String
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@index([entity, entityId])
+  @@index([actorId])
+  @@index([createdAt])
 }

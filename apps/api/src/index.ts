@@ -5,18 +5,32 @@ import cookie from '@fastify/cookie';
 import jwt from '@fastify/jwt';
 import rateLimit from '@fastify/rate-limit';
 import multipart from '@fastify/multipart';
-import { APP_NAME, SUPPORTED_CURRENCIES, SUPPORTED_LOCALES } from '@creator-platform/shared';
+import {
+  APP_NAME,
+  SUPPORTED_CURRENCIES,
+  SUPPORTED_LOCALES,
+  type PaymentChannel,
+} from '@creator-platform/shared';
 import { env } from './lib/env.js';
 import { prisma as defaultPrisma, type PrismaClient } from './lib/prisma.js';
 import { createResendEmailer, type Emailer } from './lib/email.js';
 import { createS3StorageClient, type StorageClient } from './lib/storage.js';
 import { createSharpImageProcessor, type ImageProcessor } from './lib/image.js';
+import type { IPaymentProvider } from './modules/payments/provider.interface.js';
 import { createAuthService } from './modules/auth/auth.service.js';
 import authRoutes from './modules/auth/auth.routes.js';
 import { createOnboardingService } from './modules/onboarding/onboarding.service.js';
 import onboardingRoutes from './modules/onboarding/onboarding.routes.js';
 import { createContentService } from './modules/content/content.service.js';
 import contentRoutes from './modules/content/content.routes.js';
+import { createWalletService } from './modules/wallet/wallet.service.js';
+import walletRoutes from './modules/wallet/wallet.routes.js';
+import { createPaymentsService } from './modules/payments/payments.service.js';
+import paymentRoutes from './modules/payments/payments.routes.js';
+import {
+  assertPaymentProvidersConfigured,
+  getPaymentProvider,
+} from './modules/payments/provider.factory.js';
 
 /** Max reference-image upload size, shared by the multipart limit (10 MB). */
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
@@ -32,6 +46,8 @@ export interface BuildServerOptions {
   storage?: StorageClient;
   /** Override the image processor (tests inject a fake to avoid sharp's binary). */
   images?: ImageProcessor;
+  /** Override the payment-provider factory (tests inject stub adapters). */
+  getPaymentProvider?: (channel: PaymentChannel) => IPaymentProvider;
 }
 
 export async function buildServer(opts: BuildServerOptions = {}) {
@@ -39,6 +55,13 @@ export async function buildServer(opts: BuildServerOptions = {}) {
   const emailer = opts.emailer ?? createResendEmailer();
   const storage = opts.storage ?? createS3StorageClient();
   const images = opts.images ?? createSharpImageProcessor();
+  const getProvider = opts.getPaymentProvider ?? getPaymentProvider;
+
+  // Fail fast: an unknown PAYMENT_PROVIDER_* value must stop the process here,
+  // not surface later as a failed checkout in production.
+  if (!opts.getPaymentProvider) {
+    assertPaymentProvidersConfigured();
+  }
 
   const app = Fastify({ logger: env.NODE_ENV !== 'test' });
 
@@ -108,6 +131,19 @@ export async function buildServer(opts: BuildServerOptions = {}) {
     prefix: '/api/content',
     service: contentService,
   });
+
+  const walletService = createWalletService({ prisma });
+  await app.register(walletRoutes, { prefix: '/api/wallet', service: walletService });
+
+  const paymentsService = createPaymentsService({
+    prisma,
+    wallet: walletService,
+    // Session 04's granter, reused verbatim — subscription access and PPV
+    // access are written by the same primitive.
+    grantContentAccess: contentService.grantContentAccess,
+    getProvider,
+  });
+  await app.register(paymentRoutes, { prefix: '/api/payments', service: paymentsService });
 
   return app;
 }

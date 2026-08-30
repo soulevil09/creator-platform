@@ -1,6 +1,6 @@
 // Content lifecycle business logic: upload, publish toggle, tier-filtered
 // listing, access resolution, watermarked serving, soft-delete, and the
-// grant/revoke access primitives Session 05's Stripe webhooks will call.
+// grant/revoke access primitives Session 05's payment webhooks call.
 //
 // This layer owns the DB, object storage, and image processing; it knows
 // nothing about HTTP/multipart (the routes wire those). The single most
@@ -15,6 +15,7 @@ import type {
 } from '@creator-platform/shared';
 import type { Role } from '@creator-platform/shared';
 import type { PrismaClient } from '../../lib/prisma.js';
+import type { PrismaTransactionClient } from '../wallet/wallet.service.js';
 import type { StorageClient } from '../../lib/storage.js';
 import type { ImageProcessor } from '../../lib/image.js';
 
@@ -131,17 +132,24 @@ export function createContentService({ prisma, storage, images, bucket }: Conten
 
   /**
    * Upsert a ContentAccess grant (refreshes grantReason + expiresAt on the
-   * unique contentId+userId pair). Used by serve (owner audit) now and by
-   * Session 05's Stripe webhooks for subscription/PPV grants.
+   * unique contentId+userId pair). Used by serve (owner audit) and by Session
+   * 05's payment webhooks for subscription/PPV grants.
+   *
+   * `client` lets a caller enlist the grant in its own `$transaction`, so a
+   * confirmed payment and the access it buys commit together. Defaults to the
+   * service's own client for standalone calls.
    */
-  async function grantContentAccess(params: {
-    contentId: string;
-    userId: string;
-    grantReason: string;
-    expiresAt?: Date | null;
-  }) {
+  async function grantContentAccess(
+    params: {
+      contentId: string;
+      userId: string;
+      grantReason: string;
+      expiresAt?: Date | null;
+    },
+    client: PrismaTransactionClient = prisma,
+  ) {
     const { contentId, userId, grantReason, expiresAt = null } = params;
-    return prisma.contentAccess.upsert({
+    return client.contentAccess.upsert({
       where: { contentId_userId: { contentId, userId } },
       update: { grantReason, expiresAt },
       create: { contentId, userId, grantReason, expiresAt },

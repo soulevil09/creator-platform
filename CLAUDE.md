@@ -186,15 +186,42 @@ The provider is selected at startup via env var and injected via the container. 
 
 ---
 
-### Session 05 — Payments ⏳ Pending
+### Session 05 — Payments ✅ Complete
 **File:** `.claude/sessions/session-05.md`  
 **Domain:** Woovi PIX (subscriptions + credit packs), NOWPayments crypto (subscriptions + credit packs), provider-swappable IPaymentProvider + IPayoutProvider abstractions, webhook handling, credit wallet, mocked CCBill slot
+
+**Summary:**
+- `Subscription`, `CreditWallet`, `PaymentTransaction`, `AuditLog` models + `PaymentProvider` / `PaymentTransactionType` / `PaymentStatus` / `SubscriptionStatus` enums added to Prisma; `User` gains `creditWallet` / `paymentTransactions` / `subscriptions` / `subscribers` / `auditLogs` relations. Migration `20260830120000_add_payments` generated (UNIQUE on `PaymentTransaction.idempotencyKey`, UNIQUE on `(subscriberId, modelId)`, `CHECK (balance >= 0)` on `CreditWallet`) — **generated offline, not yet applied** (see Open Items).
+- `IPaymentProvider` (`src/modules/payments/provider.interface.ts`) — `createCharge` / `verifyWebhookSignature` / `parseWebhookEvent`. Signature verification is synchronous and total (returns `false`, never throws) so a forged callback is rejected before any DB access.
+- `provider.factory.ts` — `getPaymentProvider(channel)` reads `PAYMENT_PROVIDER_PIX/_CRYPTO/_CARD` from `process.env`, memoises per channel, and throws `PaymentProviderConfigError` on an unknown name. `assertPaymentProvidersConfigured()` runs in `buildServer` so a typo crashes at boot. `mock` is additionally valid for pix/crypto as an offline dev setting; **card accepts `mock` only**.
+- `WooviPixAdapter` — `POST /api/v1/subscriptions` (recurrence, subscriptions only) + `POST /api/v1/charge` (period 1 / one-off), App ID in the `Authorization` header, BRL-only guard. Webhook signature = base64 HMAC-SHA256 over the raw body, constant-time compared.
+- `NOWPaymentsAdapter` — `POST /v1/payment` (fiat-priced, crypto-settled) + optional `POST /v1/subscriptions` when `NOWPAYMENTS_PLAN_ID_<TIER>` is configured. IPN signature = hex HMAC-SHA512 over **alphabetically sorted-key** JSON (the provider's documented scheme).
+- `MockPaymentProvider` — deterministic, zero HTTP, channel-configurable; serves the deferred CCBill card slot.
+- `POST /api/payments/checkout/subscription` and `/checkout/credits` — subscriber-only (`authenticate` + `authorize('subscriber')`), 10 req/min keyed on **userId** (not IP), price resolved from the `SUBSCRIPTION_PLANS` / `CREDIT_PACKS` catalog in `@creator-platform/shared` (a client-supplied amount is ignored), `PENDING` `PaymentTransaction` written before the provider call, provider failure → row marked `FAILED` + audited + 502.
+- `POST /api/payments/woovi/webhook` and `/nowpayments/webhook` — a plugin-scoped JSON content-type parser keeps `request.rawBody` so signatures hash exactly what the provider signed. Verify → 400 on mismatch with zero DB access; confirm via a conditional `updateMany({ where: { idempotencyKey, status: 'PENDING' } })` inside one `$transaction` that also credits the wallet (CREDIT_PACK) or upserts the `Subscription` + grants `ContentAccess` (SUBSCRIPTION) and writes the `AuditLog`. Duplicates and unknown correlation ids answer 200 with no side effects (a retry cannot change either).
+- `walletService` (`src/modules/wallet/`) — `getBalance` / `addCredits` / `debitCredits`, each accepting an optional transaction client. Debits are a conditional `updateMany({ where: { userId, balance: { gte: amount } } })` → an under-funded debit matches zero rows and throws `InsufficientCreditsError` (402) having mutated nothing. `GET /api/wallet/balance` returns the caller's own balance only (userId from the JWT, never the query).
+- `IPayoutProvider` contract (`src/modules/payouts/provider.interface.ts`) — `createPayout` / `verifyWebhookSignature` / `parseWebhookEvent`, exported from the module index. No adapter: `// TODO(Session 06): implement PaxumAdapter`.
+- `contentService.grantContentAccess` extended with an optional transaction client so subscription grants commit atomically with the payment confirmation (Session 04 logic reused verbatim, not reimplemented).
+- Shared: `PAYMENT_CHANNELS`, `CHECKOUT_CHANNELS`, `PAYMENT_PROVIDERS`, `SUBSCRIPTION_TIERS`, `SUBSCRIPTION_PLANS`, `CREDIT_PACKS`, `CHANNEL_CURRENCY`, `findCreditPack`, `ChargePayload` union, `CheckoutResponse`, `WalletBalanceResponse`.
+- Web: `/wallet` client page — balance read + credit-pack checkout trigger, renders the PIX QR + copia-e-cola or the crypto address + amount. No payment credential reaches the browser.
+- Stripe placeholders purged from all three `.env.example` files and replaced with the Woovi/NOWPayments/channel-selector blocks.
+- 54 new tests (107 total, zero regressions); `pnpm turbo run typecheck lint test build` all green.
+
+**Notes / deviations:**
+- **HTTP mocking = `nock@14`**, not msw: nock 14 intercepts Node's global `fetch` natively (the exact surface the adapters use), and `nock.disableNetConnect()` makes any un-mocked provider call a hard failure. msw's real advantage — sharing handlers between a browser worker and Node — does not apply to server-side HTTP clients.
+- **Idempotency = DB unique constraint, not an application check.** The key is minted at checkout, stored as `PaymentTransaction.idempotencyKey` (UNIQUE), and handed to the provider as its correlation/order id so the webhook echoes it back. Confirmation is a compare-and-set (`WHERE idempotencyKey = ? AND status = 'PENDING'`), so the database decides who wins; an application-level "have I seen this id?" check has a read-then-write window two concurrent deliveries can both pass.
+- Woovi PIX subscriptions are **two provider calls** (register the recurrence, then charge period 1) because PIX is a one-shot instrument — even a subscription settles as a charge per period, and the payer needs a QR code immediately.
+- NOWPayments recurrence is **best-effort**: plans must pre-exist in their dashboard, so when `NOWPAYMENTS_PLAN_ID_<TIER>` is unset the first period's payment is still created and `providerSubscriptionId` stays null, rather than pretending a recurrence exists.
+- Money is stored in **minor units as integers** everywhere (`amount` in centavos/cents); crypto `payAmount` crosses the wire as a decimal **string** because it exceeds what a JS number carries safely.
+- Checkout rate limiting is keyed on `userId`, not IP: two subscribers behind one NAT must not exhaust each other's budget, and one account must not get a fresh budget per IP.
+- The persisted `provider` column comes from `adapter.name`, not a channel→provider lookup table, so a provider swap is visible in the data with nothing to keep in sync.
+- **ARIA validation:** `eslint-plugin-jsx-a11y` (flat config, `**/*.tsx`) added to the root ESLint config — 34 rules active on the wallet page, zero findings. Runs in CI with the rest of lint.
 
 **External Prerequisites:**
 - [x] MEI aberto — CNPJ 67.735.318/0001-91 ativo na Receita Federal
 - [x] Conta Nubank PJ criada — chave PIX CNPJ vinculada
 - [x] Conta Woovi (OpenPix) criada em app.woovi.com — empresa "Creator Platform", CNPJ 67.735.318/0001-91, plano percentual 0,80%
-  - [ ] Coletar `OPENPIX_APP_ID` no dashboard → API/Plugins
+  - [ ] Coletar `OPENPIX_APP_ID` no dashboard → API/Plugins _(code is ready; not needed for tests)_
   - [ ] Coletar `OPENPIX_WEBHOOK_SECRET` no dashboard → Webhooks → criar webhook
 - [ ] Criar conta NOWPayments: https://nowpayments.io → Sign Up
   - [ ] Coletar `NOWPAYMENTS_API_KEY` em Store Settings
@@ -320,6 +347,26 @@ _Session 04 — content-specific decisions:_
 - **Tier access via `ContentAccess` rows** — a `contentId+userId` join with `grantReason` + optional `expiresAt`, checked server-side on every serve/list. `grantContentAccess`/`revokeContentAccess` are the write primitives Session 05's payment webhooks will call.
 - **`cuid2` for storage keys** — collision-resistant content IDs in `content/{modelId}/{cuid2}.{ext}`.
 
+_Session 05 — payments implementation decisions:_
+
+- **Idempotency lives in the database, not in application logic.** The correlation id minted at checkout is stored as `PaymentTransaction.idempotencyKey` (UNIQUE) and handed to the provider as its correlation/order id, so the webhook echoes it back. Confirmation is a compare-and-set — `updateMany({ where: { idempotencyKey, status: 'PENDING' } })` — so Postgres arbitrates: a replay matches zero rows and the credit/grant never runs, and two concurrent deliveries serialize on the row lock. An application-level "have I seen this id?" check has a read-then-write window both deliveries can pass through.
+
+- **One `$transaction` per confirmed event.** The status claim, the wallet credit (or subscription upsert + `ContentAccess` grants), and the `AuditLog` row commit together. There is no instant at which a transaction reads CONFIRMED but the thing it paid for has not been granted.
+
+- **Raw bytes for signature verification.** A JSON content-type parser scoped to the payments plugin keeps `request.rawBody`; re-serializing the parsed body changes key order and whitespace, and the digest with it. Verification runs before the first database statement, so a forged callback costs one HMAC.
+
+- **Prices come from a server-side catalog.** `SUBSCRIPTION_PLANS` and `CREDIT_PACKS` in `@creator-platform/shared` are the only source of an amount; checkout schemas have no `amount` field, so a client can choose *what* to buy but never *for how much*.
+
+- **Money is integer minor units.** Every persisted amount is centavos/cents as an `Int`. Crypto `payAmount` crosses the wire as a decimal string — it carries more precision than a JS number holds safely.
+
+- **Balances cannot go negative by construction.** `debitCredits` is a conditional update (`WHERE userId = ? AND balance >= ?`); an under-funded debit matches zero rows and throws, with a `CHECK (balance >= 0)` constraint as backstop. No read-then-write, no partial mutation.
+
+- **`nock@14` over msw for adapter tests.** nock 14 intercepts Node's global `fetch` natively — the exact surface the adapters use — and `nock.disableNetConnect()` turns any un-mocked provider call into a hard failure. msw's advantage is sharing handlers between a browser worker and Node, which does not apply to server-side HTTP clients.
+
+- **`mock` is a valid pix/crypto adapter in development.** It makes checkout work before the Woovi and NOWPayments merchant accounts are approved, and it is what proves the abstraction holds: flipping `PAYMENT_PROVIDER_PIX` swaps the class with no other change. The **card** channel still accepts `mock` and nothing else — CCBill must be wired in deliberately, never by flipping an env var.
+
+- **Checkout rate limits key on `userId`, not IP.** Two subscribers behind one NAT must not exhaust each other's budget, and one account must not earn a fresh budget per IP.
+
 _Pre-Session 05 — payment stack decisions (Stripe permanently excluded):_
 
 - **Stripe is off-limits** — Stripe explicitly prohibits adult content, AI-generated adult content, and credit-based adult platforms. Account terminations occur without warning. This is a hard, permanent constraint.
@@ -342,7 +389,7 @@ _Pre-Session 05 — payment stack decisions (Stripe permanently excluded):_
 
 - **Credit wallet model** — credits are an internal currency. `CreditWallet` table tracks balance per user. Purchase (Woovi PIX webhook / NOWPayments IPN) → credit balance up. AI image generation → credit balance down. No payment triggered at generation time. Subscription grants → `ContentAccess` rows via `grantContentAccess`.
 
-**Swap-readiness notes:** DB provider swappable behind Prisma; AI provider behind `AI_PROVIDER` env switch; storage behind S3-compatible env vars; email provider behind the `Emailer` interface; image processing behind the `ImageProcessor` interface; PIX payment provider behind `IPaymentProvider` (`PAYMENT_PROVIDER_PIX` env); crypto payment provider behind `IPaymentProvider` (`PAYMENT_PROVIDER_CRYPTO` env); card payment provider behind `IPaymentProvider` (`PAYMENT_PROVIDER_CARD` env, mocked until CCBill activation); payout provider behind `IPayoutProvider`.
+**Swap-readiness notes:** DB provider swappable behind Prisma; AI provider behind `AI_PROVIDER` env switch; storage behind S3-compatible env vars; email provider behind the `Emailer` interface; image processing behind the `ImageProcessor` interface; PIX payment provider behind `IPaymentProvider` (`PAYMENT_PROVIDER_PIX` env); crypto payment provider behind `IPaymentProvider` (`PAYMENT_PROVIDER_CRYPTO` env); card payment provider behind `IPaymentProvider` (`PAYMENT_PROVIDER_CARD` env, mocked until CCBill activation); payout provider behind `IPayoutProvider` (contract only until Session 06). All three payment channels were exercised through the abstraction in Session 05: swapping `PAYMENT_PROVIDER_PIX` from `woovi` to `mock` changes the adapter class and nothing else.
 
 ---
 
@@ -354,6 +401,7 @@ creator-platform/
 │   ├── web/                         # Next.js 14 App Router (@creator-platform/web)
 │   │   ├── src/app/layout.tsx
 │   │   ├── src/app/page.tsx
+│   │   ├── src/app/wallet/page.tsx  # balance + credit-pack checkout (Session 05)
 │   │   ├── next.config.mjs
 │   │   ├── tsconfig.json
 │   │   └── .env.example
@@ -387,8 +435,8 @@ creator-platform/
 │       │   └── types/
 │       │       └── fastify-jwt.d.ts
 │       ├── prisma/
-│       │   ├── schema.prisma        # User + ModelProfile + Content models, enums
-│       │   ├── migrations/          # …_add_user_model, …_add_model_profile, …_add_content_management
+│       │   ├── schema.prisma        # User, ModelProfile, Content, payments models + enums
+│       │   ├── migrations/          # …_add_user_model, …_add_model_profile, …_add_content_management, …_add_payments
 │       │   └── generated/           # Prisma client output (gitignored)
 │       ├── scripts/
 │       │   └── postinstall.mjs
@@ -435,9 +483,13 @@ All `.env*` files are gitignored; examples contain placeholders only.
 | `PAYMENT_PROVIDER_PIX` | api | 05 | Active PIX adapter: `woovi` |
 | `OPENPIX_APP_ID` | api | 05 | Woovi (OpenPix) App ID — Dashboard → API/Plugins |
 | `OPENPIX_WEBHOOK_SECRET` | api | 05 | Woovi webhook signature secret — Dashboard → Webhooks |
+| `OPENPIX_API_URL` | api | 05 | Woovi API base URL (default `https://api.woovi.com`) |
 | `PAYMENT_PROVIDER_CRYPTO` | api | 05 | Active crypto adapter: `nowpayments` |
 | `NOWPAYMENTS_API_KEY` | api | 05 | NOWPayments API key |
 | `NOWPAYMENTS_IPN_SECRET` | api | 05 | NOWPayments IPN (webhook) secret |
+| `NOWPAYMENTS_API_URL` | api | 05 | NOWPayments API base URL (default `https://api.nowpayments.io`) |
+| `NOWPAYMENTS_PLAN_ID_STANDARD` / `_PREMIUM` | api | 05 | Optional recurring-plan ids; blank = skip provider-side recurrence |
+| `API_PUBLIC_URL` | api | 05 | Internet-reachable base URL the providers post webhooks to |
 | `PAYMENT_PROVIDER_CARD` | api | 05 | Active card adapter: `mock` (CCBill when activated post-MVP) |
 | `CCBILL_ACCOUNT_NUMBER` | api | _post-MVP_ | CCBill main account number (6-digit) — deferred |
 | `CCBILL_SUBACCOUNT` | api | _post-MVP_ | CCBill subaccount number (4-digit) — deferred |
@@ -462,6 +514,11 @@ All `.env*` files are gitignored; examples contain placeholders only.
 - **Content uploads buffer the full file into memory before storage write** (Session 04) — acceptable at MVP; true streaming needs the S3 multipart upload API (deferred).
 - **Soft-deleted content objects are left in storage** (Session 04) — a cleanup job to purge `deletedAt` rows' objects is deferred (Session 09/12 candidate).
 - **Locked-teaser listing deferred** (Session 04) — the list endpoint hides inaccessible gated content rather than returning it with a null thumbnail; revisit if the UI wants upsell teasers.
+- **⚠️ Session 05 migration not yet applied** — `20260830120000_add_payments` was generated offline with `prisma migrate diff` because the Supabase host (`db.cwlewexnhmfyamvpubio.supabase.co:5432`) was unreachable during the session (free-tier projects pause after inactivity). The SQL is committed and correct against the schema, but **must be applied before the payments endpoints will work against a real DB**: resume the Supabase project, then run `cd apps/api && npx prisma migrate deploy` (or `migrate dev` to also refresh the shadow history). All 107 tests run against an in-memory Prisma fake and are unaffected.
+- **Provider request/response shapes need live verification** (Session 05) — the Woovi and NOWPayments adapters were written against published API docs and exercised only against nock-mocked HTTP, because neither merchant account is approved yet. Re-verify field names (`charge.brCode`, `charge.transactionID`, `pay_address`, `pay_amount`, the `x-webhook-signature` / `x-nowpayments-sig` schemes) against a live sandbox charge before going to production.
+- **Subscription renewal and cancellation are not implemented** (Session 05) — a confirmed payment activates a 30-day period and grants `ContentAccess` rows that expire with it, so a lapse revokes access on its own. What is missing is the renewal charge, `POST /cancel`, and handling of `PAST_DUE`. Candidate: Session 06 alongside payouts.
+- **PPV single-item purchase is not wired** (Session 05) — `Content.ppvPriceCents` and the `ppv_purchase` grant reason exist from Session 04, but no checkout path sells one item. Add a third `PaymentTransaction.type` when the UI needs it.
+- **Content published after a subscription starts is not auto-granted** (Session 05) — `ContentAccess` rows are written at confirmation time for the model's then-published catalogue. New uploads mid-period need either a grant-on-publish hook or a subscription-aware check in `resolveAccess`. Revisit when upload cadence matters.
 - **Woovi adult content policy** — Woovi/OpenPix é um gateway PIX brasileiro regulado. Antes de ir ao ar em produção com conteúdo explícito adulto, confirmar com o suporte deles (suporte@woovi.com) se aceitam plataformas adult 18+. PIX em si não tem restrição de conteúdo (é infraestrutura do Banco Central), mas o gateway pode ter política própria.
 - **CCBill deferred to post-MVP** — $1,450/yr Visa+MC registration fees make card processing financially unviable at MVP stage. CCBill slot is scaffolded as `MockPaymentProvider`. Activate when monthly revenue covers the annual fee.
 - **NOWPayments crypto-to-fiat conversion** — NOWPayments settles in cryptocurrency. To receive BRL/USD fiat, platform must maintain exchange accounts (Bybit/OKX/Binance) and execute regular USDT→fiat withdrawals. This is an operational step outside the codebase.
@@ -472,4 +529,4 @@ All `.env*` files are gitignored; examples contain placeholders only.
 
 ---
 
-## Last Updated — Session 04 complete / PIX provider updated to Woovi (OpenPix) — MEI CNPJ 67.735.318/0001-91 + Nubank PJ + Woovi conta criada [2026-06-29]
+## Last Updated — Session 05 complete: payments (Woovi PIX + NOWPayments crypto adapters, IPaymentProvider abstraction, webhooks, credit wallet, IPayoutProvider contract). 107 tests green. Payments migration generated but NOT yet applied — Supabase host was unreachable [2026-08-30]

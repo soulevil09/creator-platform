@@ -7,6 +7,7 @@
 import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
 import globals from 'globals';
+import jsxA11y from 'eslint-plugin-jsx-a11y';
 
 export default tseslint.config(
   {
@@ -28,6 +29,14 @@ export default tseslint.config(
         ...globals.browser,
       },
     },
+  },
+  // Accessibility rules for the React surface (Session 05 ships the first
+  // interactive UI). Static ARIA/semantics validation, run in CI with the rest
+  // of lint: invalid roles, unlabelled controls, missing alt text, and
+  // non-interactive elements given handlers all fail the build.
+  {
+    files: ['**/*.tsx'],
+    ...jsxA11y.flatConfigs.recommended,
   },
   {
     files: ['**/*.{ts,tsx}'],
