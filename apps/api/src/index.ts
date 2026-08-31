@@ -138,8 +138,8 @@ export async function buildServer(opts: BuildServerOptions = {}) {
   const paymentsService = createPaymentsService({
     prisma,
     wallet: walletService,
-    // Session 04's granter, reused verbatim — subscription access and PPV
-    // access are written by the same primitive.
+    // Session 04's granter, reused verbatim — every access grant goes through
+    // this one primitive.
     grantContentAccess: contentService.grantContentAccess,
     getProvider,
   });

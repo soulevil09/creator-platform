@@ -13,8 +13,8 @@
 // Session 04 adds the content lifecycle: Content (monetizable media stored
 // behind short-lived signed URLs / on-the-fly watermarking — only the object
 // key is persisted, never exposed) and ContentAccess (per-user access grants,
-// the join that gates tier-based and PPV viewing; populated by Session 05's
-// payment webhooks).
+// the join that gates tier-based viewing; populated by Session 05's payment
+// webhooks).
 // Session 05 adds the payments domain: Subscription, CreditWallet,
 // PaymentTransaction (idempotency-keyed) and AuditLog.
 // =============================================================================
@@ -122,7 +122,8 @@ enum ContentType {
 }
 
 // Visibility tier. FREE is a public teaser; STANDARD requires any active
-// subscription; PREMIUM requires the PREMIUM tier or an individual PPV unlock.
+// subscription; PREMIUM requires an active PREMIUM subscription. Single-item
+// (pay-per-view) purchase is out of product scope — see CLAUDE.md.
 enum ContentTier {
   FREE
   STANDARD
@@ -130,25 +131,24 @@ enum ContentTier {
 }
 
 model Content {
-  id            String      @id @default(cuid())
-  modelId       String
-  model         User        @relation(fields: [modelId], references: [id])
-  title         String
-  description   String?
-  type          ContentType
-  tier          ContentTier @default(STANDARD)
-  storageKey    String // S3 key, never exposed externally
-  mimeType      String
-  sizeBytes     Int
-  width         Int? // pixels, images only
-  height        Int? // pixels, images only
-  durationSecs  Int? // seconds, videos only (null at MVP — no ffprobe)
-  isPublished   Boolean     @default(false)
-  ppvPriceCents Int? // null = not PPV; set = optional PPV add-on
-  viewCount     Int         @default(0)
-  deletedAt     DateTime? // soft-delete tombstone; storage cleanup deferred
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @updatedAt
+  id           String      @id @default(cuid())
+  modelId      String
+  model        User        @relation(fields: [modelId], references: [id])
+  title        String
+  description  String?
+  type         ContentType
+  tier         ContentTier @default(STANDARD)
+  storageKey   String // S3 key, never exposed externally
+  mimeType     String
+  sizeBytes    Int
+  width        Int? // pixels, images only
+  height       Int? // pixels, images only
+  durationSecs Int? // seconds, videos only (null at MVP — no ffprobe)
+  isPublished  Boolean     @default(false)
+  viewCount    Int         @default(0)
+  deletedAt    DateTime? // soft-delete tombstone; storage cleanup deferred
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
 
   accesses ContentAccess[]
 
@@ -159,7 +159,7 @@ model Content {
 
 // ─── ContentAccess (Session 04) ──────────────────────────────────────────────
 // A per-user grant to view one Content item. `grantReason` records why access
-// was granted; `expiresAt` is null for permanent grants (PPV purchase) and set
+// was granted; `expiresAt` is null for permanent grants (owner/admin) and set
 // for subscription-derived access (recalculated on renewal). The /serve and
 // list endpoints check `expiresAt` server-side on every request. Session 05's
 // Woovi/NOWPayments webhook handler is the main writer (via grantContentAccess).
@@ -169,9 +169,9 @@ model ContentAccess {
   content     Content   @relation(fields: [contentId], references: [id])
   userId      String
   user        User      @relation(fields: [userId], references: [id])
-  grantReason String // 'subscription_standard' | 'subscription_premium' | 'ppv_purchase' | 'model_owner' | 'admin'
+  grantReason String // 'subscription_standard' | 'subscription_premium' | 'model_owner' | 'admin'
   grantedAt   DateTime  @default(now())
-  expiresAt   DateTime? // null = permanent (e.g. PPV); set for subscription-based
+  expiresAt   DateTime? // null = permanent (owner/admin); set for subscription-based
 
   @@unique([contentId, userId])
   @@index([userId])

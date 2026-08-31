@@ -98,7 +98,6 @@ export type ContentListItem = {
   /** Signed thumbnail URL (≤300s TTL); null when the requester lacks access. */
   thumbnailUrl: string | null;
   hasAccess: boolean;
-  ppvPriceCents: number | null;
   viewCount: number;
   createdAt: string;
 };

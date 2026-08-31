@@ -142,7 +142,6 @@ export default async function contentRoutes(
             description: parsed.data.description,
             type: parsed.data.type,
             tier: parsed.data.tier,
-            ppvPriceCents: parsed.data.ppvPriceCents,
           },
           {
             buffer: fileBuffer,

@@ -47,7 +47,6 @@ interface FakeContent {
   height: number | null;
   durationSecs: number | null;
   isPublished: boolean;
-  ppvPriceCents: number | null;
   viewCount: number;
   deletedAt: Date | null;
   createdAt: Date;
@@ -139,7 +138,6 @@ function createFakePrisma() {
           height: null,
           durationSecs: null,
           isPublished: false,
-          ppvPriceCents: null,
           viewCount: 0,
           deletedAt: null,
           ...data,
@@ -315,7 +313,6 @@ function seedContent(prisma: FakePrisma, overrides: Partial<FakeContent> & { mod
     height: 600,
     durationSecs: null,
     isPublished: true,
-    ppvPriceCents: null,
     viewCount: 0,
     deletedAt: null,
     createdAt: new Date(Date.now() + n),
@@ -620,6 +617,40 @@ describe('GET /api/content/:contentId/serve', () => {
     });
     expect(res.statusCode).toBe(403);
     expect(images.watermark).not.toHaveBeenCalled();
+  });
+
+  it('forbids PREMIUM content to a STANDARD subscriber → 403', async () => {
+    // PREMIUM is subscription-only: a STANDARD grant is the only other kind of
+    // active grant there is now that pay-per-view is gone.
+    const subCookie = await loginAs(app, prisma, 'subscriber', 'sub@example.com');
+    const subId = userIdFor(prisma, 'sub@example.com');
+    const c = seedContent(prisma, { modelId, tier: 'PREMIUM' });
+    grantAccess(prisma, c.id, subId, 'subscription_standard');
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/content/${c.id}/serve`,
+      cookies: { access_token: subCookie },
+    });
+
+    expect(res.statusCode).toBe(403);
+    expect(images.watermark).not.toHaveBeenCalled();
+  });
+
+  it('serves PREMIUM content to a PREMIUM subscriber', async () => {
+    const subCookie = await loginAs(app, prisma, 'subscriber', 'premium@example.com');
+    const subId = userIdFor(prisma, 'premium@example.com');
+    const c = seedContent(prisma, { modelId, tier: 'PREMIUM' });
+    grantAccess(prisma, c.id, subId, 'subscription_premium');
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/content/${c.id}/serve`,
+      cookies: { access_token: subCookie },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(images.watermark).toHaveBeenCalledOnce();
   });
 
   it('rejects an unauthenticated serve request → 401', async () => {

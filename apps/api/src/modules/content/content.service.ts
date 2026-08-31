@@ -26,8 +26,8 @@ const VIDEO_SERVE_URL_TTL = 60;
 /** Platform label burned into the per-user watermark. */
 const WATERMARK_BRAND = 'CreatorPlatform';
 
-/** Grant reasons that satisfy PREMIUM-tier access. */
-const PREMIUM_GRANT_REASONS = new Set(['subscription_premium', 'ppv_purchase']);
+/** The only grant reason that satisfies PREMIUM-tier access. */
+const PREMIUM_GRANT_REASON = 'subscription_premium';
 
 /** Typed error carrying the HTTP status the route should respond with. */
 export class ContentError extends Error {
@@ -61,7 +61,6 @@ export interface UploadMetadata {
   description?: string;
   type: ContentType;
   tier: ContentTier;
-  ppvPriceCents?: number;
 }
 
 /** Requester identity for access resolution (undefined = anonymous). */
@@ -99,7 +98,7 @@ export function createContentService({ prisma, storage, images, bucket }: Conten
   /**
    * Decide whether `requester` may view `content`, and why. Owner and admin
    * always pass; FREE is public; STANDARD needs any active grant; PREMIUM needs
-   * a premium/ppv grant. Expired grants never count.
+   * an active PREMIUM subscription grant. Expired grants never count.
    */
   async function resolveAccess(
     content: { id: string; modelId: string; tier: ContentTier },
@@ -124,7 +123,7 @@ export function createContentService({ prisma, storage, images, bucket }: Conten
     if (!grant || !accessIsActive(grant)) {
       return { hasAccess: false, reason: null };
     }
-    if (content.tier === 'PREMIUM' && !PREMIUM_GRANT_REASONS.has(grant.grantReason)) {
+    if (content.tier === 'PREMIUM' && grant.grantReason !== PREMIUM_GRANT_REASON) {
       return { hasAccess: false, reason: null };
     }
     return { hasAccess: true, reason: grant.grantReason };
@@ -133,7 +132,7 @@ export function createContentService({ prisma, storage, images, bucket }: Conten
   /**
    * Upsert a ContentAccess grant (refreshes grantReason + expiresAt on the
    * unique contentId+userId pair). Used by serve (owner audit) and by Session
-   * 05's payment webhooks for subscription/PPV grants.
+   * 05's payment webhooks for subscription grants.
    *
    * `client` lets a caller enlist the grant in its own `$transaction`, so a
    * confirmed payment and the access it buys commit together. Defaults to the
@@ -206,7 +205,6 @@ export function createContentService({ prisma, storage, images, bucket }: Conten
           sizeBytes: file.sizeBytes,
           width,
           height,
-          ppvPriceCents: meta.ppvPriceCents ?? null,
           isPublished: false,
         },
       });
@@ -292,7 +290,6 @@ export function createContentService({ prisma, storage, images, bucket }: Conten
             ? await storage.getSignedUrl(bucket, row.storageKey, THUMBNAIL_URL_TTL)
             : null,
           hasAccess,
-          ppvPriceCents: row.ppvPriceCents ?? null,
           viewCount: row.viewCount,
           createdAt: iso(row.createdAt),
         })),

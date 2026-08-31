@@ -1,9 +1,9 @@
 // Request validation schemas (Zod) for the content module.
 //
-// Multipart fields arrive as strings, so the upload-metadata schema coerces
-// `ppvPriceCents` from its string form and trims text inputs (same manual
-// `safeParse`-at-the-handler approach used by auth/onboarding). The publish and
-// list schemas validate JSON body / query strings respectively.
+// Multipart fields arrive as strings, so the upload-metadata schema trims text
+// inputs and coerces where needed (same manual `safeParse`-at-the-handler
+// approach used by auth/onboarding). The publish and list schemas validate JSON
+// body / query strings respectively.
 import { z } from 'zod';
 import { CONTENT_TIERS, CONTENT_TYPES } from '@creator-platform/shared';
 
@@ -18,16 +18,6 @@ export const uploadMetadataSchema = z.object({
     .transform((v) => (v === '' || v === undefined ? undefined : v)),
   type: z.enum(CONTENT_TYPES),
   tier: z.enum(CONTENT_TIERS).default('STANDARD'),
-  // Optional PPV price. From multipart it's a string; normalise blank/absent to
-  // undefined (not PPV), otherwise coerce to an integer of at least 100 cents.
-  ppvPriceCents: z.preprocess(
-    (v) => (v === '' || v === undefined || v === null ? undefined : Number(v)),
-    z
-      .number({ message: 'ppvPriceCents must be a number' })
-      .int('ppvPriceCents must be an integer')
-      .min(100, 'ppvPriceCents must be at least 100')
-      .optional(),
-  ),
 });
 export type UploadMetadataInput = z.infer<typeof uploadMetadataSchema>;
 
