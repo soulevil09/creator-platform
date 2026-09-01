@@ -252,12 +252,18 @@ The provider is selected at startup via env var and injected via the container. 
 - `GET /api/payouts` (ADMIN, paginated) and `GET /api/payouts/:payoutId` (ADMIN or the owning MODEL — another model's payout is a **404, not a 403**, so payout ids are not enumerable).
 - `.github/workflows/weekly-payout.yml` — `cron: '0 12 * * 1'` (Monday 12:00 UTC), `workflow_dispatch` for a missed week, `concurrency` guard, secret read from the environment so it never reaches the run log.
 - Shared: `PAYOUT_PROVIDERS`, `PAYOUT_STATUSES`, `PayoutRecordStatus`, `DEFAULT_REVENUE_SHARE_MODEL_PCT`, `DEFAULT_PAYOUT_MIN_THRESHOLD_CENTS`, `PAYOUT_PERIOD_DAYS`, `PayoutBalanceResponse`, `PayoutRunSummary`, `PayoutListItem`, `PayoutListResponse`, `PayoutDetailResponse`.
-- 50 new tests (159 total, zero regressions); `pnpm turbo run typecheck lint test build` all green.
+
+**Addendum — `payoutEmail` (same session, before commit):**
+- `ModelProfile.payoutEmail String? @unique` added; migration `20260901180000_add_payout_email` **generated and applied** (7 migrations now live). UNIQUE is the real guard: two models pointing at one Paxum address would misroute funds, so the database refuses it rather than trusting an application check.
+- `PUT /api/payouts/payout-email` — `authenticate` + `authorize('model')`, userId from the JWT (a `modelId` in the body is ignored), email validated + lowercased + trimmed so casing cannot sidestep the unique index, 10/hour. Writes a `payout.email_changed` `AuditLog` row carrying the previous and new address — this field is "where the money goes", so it is held to the bank-detail bar. A no-op re-submit writes no audit row. 400 malformed / 401 anonymous / 403 subscriber / 404 no profile yet / **409 already claimed** (P2002 surfaced as a clean conflict, never a raw DB error).
+- The payout run now sources the recipient from `ModelProfile.payoutEmail` and **never** `User.email`. A model above threshold with no destination is **skipped**, not failed — nothing claimed, balance untouched, `payout.skipped_no_payout_email` audited — mirroring the existing "account no longer exists" path. They are paid on the first run after they set one.
+- `GET /api/payouts/balance` gains `payoutEmailConfigured: boolean`. The address itself is not echoed back: that endpoint answers "how much", not "to where".
+- 67 payout tests in total (176 across the suite, zero regressions); `pnpm turbo run typecheck lint test build` all green.
 
 **Notes / deviations:**
 - **The payout factory lives in `modules/payouts/provider.factory.ts`, not in the payments one.** The spec said "extend `provider.factory.ts`"; extending the payments factory would have made the payments module import a payout adapter, which breaks the money-in/money-out separation the two interfaces exist to enforce. The payouts factory mirrors the payments one line for line — same memoisation, same boot-time assert, same "unknown name crashes rather than falls back".
 - **`modules/payouts/adapters/http.ts` deliberately duplicates its payments sibling** rather than importing it: the payments version is typed to `PaymentProviderName` and throws `PaymentProviderError`, and the two error taxonomies are meaningfully different (a failed charge is a 502 to a waiting subscriber; a failed payout rolls a claim back inside a cron run). The signature helpers (`hmac`/`safeEquals`/`headerValue`) *are* reused — they are pure crypto utilities with no payments coupling.
-- **Recipient address = the model's platform account email.** Paxum addresses recipients by the email on their personal Paxum account; there is no `payoutEmail` field on `ModelProfile` yet, and adding one would need an onboarding endpoint that is out of this session's scope. Flagged as an Open Item.
+- **Recipient address lives on `ModelProfile.payoutEmail`, set by the model.** Paxum pays into a personal Paxum account whose email need not match the platform login, so there is nothing safe to fall back to — a model without a destination is skipped rather than paid to a guessed address. (Originally shipped using `User.email` and flagged as an Open Item; closed by the addendum above, before commit.)
 - **`Payout.status` (`PENDING|PROCESSING|COMPLETED|FAILED`) is our record's state; `PayoutStatus` in `provider.interface.ts` (`PENDING|PAID|FAILED`) is the provider's normalized vocabulary.** They are deliberately distinct — the shared type for ours is `PayoutRecordStatus`.
 - **A model whose account has vanished is counted as `skipped`, not `failed`** — the `Payout.modelId` FK means no row can be created for them, so there is nothing to fail. It writes a `payout.skipped_no_recipient` audit entry.
 - **`/run` returns aggregates only.** No model ids, no per-model amounts: the caller is a machine holding a shared secret, so the response must not double as a payout-history oracle.
@@ -413,6 +419,8 @@ _Session 06 — payouts implementation decisions:_
 
 - **Credit-pack revenue is deliberately out of the split.** Credits are a wallet-wide balance with no per-model attribution until AI generation ships (Session 08), so there is nothing honest to split; `CREDIT_PACK` rows leave both shares null rather than carrying an invented number.
 
+- **A payout destination is never inferred.** `ModelProfile.payoutEmail` is set explicitly by the model, is UNIQUE at the database level, and every change is audit-logged with its previous value. Falling back to `User.email` would have been convenient and wrong: Paxum pays into a personal account whose address need not match the login, and a wrong address is an irreversible transfer, not a validation error. A model without one is skipped — the balance is safe where it is.
+
 - **`PaxumAdapter` ships pre-approval, like Woovi and NOWPayments did.** The Business account is not approved, so the wire format is written against Paxum's publicly documented mass-payout mechanics and exercised only against `nock`. Every provisional name is marked as such in the adapter and tracked as an Open Item. What is *not* provisional is the seam: correcting a field name later touches one class.
 
 _Post-Session 05 — scope correction:_
@@ -495,14 +503,14 @@ creator-platform/
 │       │   │       ├── provider.interface.ts + provider.factory.ts
 │       │   │       ├── revenue.ts           # computeRevenueSplit (80/20)
 │       │   │       ├── payouts.routes.ts / .service.ts / .schema.ts
-│       │   │       └── payouts.test.ts      # 50 tests
+│       │   │       └── payouts.test.ts      # 67 tests
 │       │   ├── test/
 │       │   │   └── fake-prisma.ts           # shared in-memory Prisma stand-in
 │       │   └── types/
 │       │       └── fastify-jwt.d.ts
 │       ├── prisma/
-│       │   ├── schema.prisma        # User, ModelProfile, Content, payments + Payout models + enums
-│       │   ├── migrations/          # …_add_user_model, …_add_model_profile, …_add_content_management, …_add_payments, …_remove_ppv, …_add_payouts
+│       │   ├── schema.prisma        # User, ModelProfile (+payoutEmail), Content, payments + Payout models + enums
+│       │   ├── migrations/          # …_add_user_model, …_add_model_profile, …_add_content_management, …_add_payments, …_remove_ppv, …_add_payouts, …_add_payout_email
 │       │   └── generated/           # Prisma client output (gitignored)
 │       ├── scripts/
 │       │   └── postinstall.mjs
@@ -591,7 +599,7 @@ All `.env*` files are gitignored; examples contain placeholders only.
 - ~~**Session 05 migration not yet applied**~~ — **resolved in Session 06.** The Supabase host was reachable again; `npx prisma migrate deploy` applied `20260830120000_add_payments`, `20260831025136_remove_ppv` and `20260901120000_add_payouts`. `prisma migrate status` reports all 6 migrations applied.
 - **Provider request/response shapes need live verification** (Session 05) — the Woovi and NOWPayments adapters were written against published API docs and exercised only against nock-mocked HTTP, because neither merchant account is approved yet. Re-verify field names (`charge.brCode`, `charge.transactionID`, `pay_address`, `pay_amount`, the `x-webhook-signature` / `x-nowpayments-sig` schemes) against a live sandbox charge before going to production.
 - **Paxum request/response shapes need live verification** (Session 06) — the `PaxumAdapter` was written against Paxum's publicly documented mass-payout *mechanics* (Paxum-to-Paxum P2P by recipient email, batch submit, asynchronous IPN confirmation, major-unit decimal amounts) and exercised only against nock-mocked HTTP, because the Business account is not approved yet. **These are provisional, not confirmed fact:** the `POST /v1/mass-payouts` path, the `x-api-key` auth header, the request keys (`payments[].correlationId` / `recipientEmail` / `amount` / `currency`, `callbackUrl`), the response keys (`batchId`, `payments[].transactionId` / `status` / `errorMessage`), the `x-paxum-signature` header, and the HMAC-SHA256-hex-over-raw-body IPN scheme. Re-verify every one against a live sandbox batch before production. All of it is confined to `paxum.adapter.ts` behind `IPayoutProvider`.
-- **Models are paid at their platform account email** (Session 06) — Paxum addresses recipients by the email on their personal Paxum account, which may differ from their login email. A `payoutEmail` field on `ModelProfile` plus an onboarding endpoint to set it is needed before real transfers; until then a model whose Paxum email differs will have their payout rejected (which fails safely — the `Payout` goes FAILED and the balance is released back).
+- ~~**Models are paid at their platform account email**~~ — **resolved by the Session 06 addendum.** `ModelProfile.payoutEmail` (nullable, UNIQUE) is now the payout destination, set by the model through `PUT /api/payouts/payout-email` and audited on every change. `User.email` is never used as a payout address. A model who has not set one is **skipped** by a run (`payout.skipped_no_payout_email`), so their balance stays payable rather than being sent to a wrong address. `GET /api/payouts/balance` returns `payoutEmailConfigured` so a UI can prompt for it. Migration `20260901180000_add_payout_email` applied.
 - **Payout earnings are summed in minor units without FX conversion** (Session 06) — the balance query sums `modelShareCents` across currencies, and a claim whose rows disagree falls back to `PAYOUT_CURRENCY`. Harmless while PIX/BRL dominates; a model earning in both BRL (PIX) and USD (crypto) needs per-currency payouts and an FX policy. Candidate: Session 11 alongside the admin dashboard.
 - **Credit-pack revenue is not shared with models** (Session 06, by design) — credits are a wallet-wide balance with no per-model attribution until AI generation ships. Extending payouts to cover credit spend is explicit Session 08 follow-up work, once generation events carry a `modelId`.
 - **No `Payout` reconciliation job** (Session 06) — a `PROCESSING` payout whose IPN never arrives stays `PROCESSING` forever; there is no sweeper that re-queries Paxum for stale batches. Add one when real volume exists (Session 11/12 candidate).
@@ -607,4 +615,4 @@ All `.env*` files are gitignored; examples contain placeholders only.
 
 ---
 
-## Last Updated — Session 06 complete: revenue sharing & payouts (80/20 split stamped per confirmed subscription, ledger-derived model balance, `PaxumAdapter` + `MockPayoutProvider` on `IPayoutProvider`, weekly cron-triggered payout run with compare-and-set claiming and failure rollback, Paxum IPN, admin payout visibility). 159 tests green. Migration `20260901120000_add_payouts` generated **and applied** — all 6 migrations now live on Supabase [2026-09-01]
+## Last Updated — Session 06 complete: revenue sharing & payouts (80/20 split stamped per confirmed subscription, ledger-derived model balance, `PaxumAdapter` + `MockPayoutProvider` on `IPayoutProvider`, weekly cron-triggered payout run with compare-and-set claiming and failure rollback, Paxum IPN, admin payout visibility), plus the `payoutEmail` addendum (self-service payout destination on `ModelProfile`, UNIQUE + audited; runs skip models without one). 176 tests green. Migrations `20260901120000_add_payouts` and `20260901180000_add_payout_email` generated **and applied** — all 7 migrations now live on Supabase [2026-09-01]
