@@ -7,6 +7,11 @@
 // "if JWT_SECRET, JWT_REFRESH_SECRET, or EMAIL_API_KEY are missing → throw and
 // exit". No secret is ever logged.
 // =============================================================================
+import {
+  DEFAULT_PAYOUT_MIN_THRESHOLD_CENTS,
+  DEFAULT_REVENUE_SHARE_MODEL_PCT,
+  type Currency,
+} from '@creator-platform/shared';
 
 /**
  * Required in production, optional elsewhere. Used for third-party payment
@@ -18,6 +23,24 @@ function requiredInProduction(name: string, nodeEnv: string): string {
   if (nodeEnv === 'production' && value.trim() === '') {
     throw new Error(
       `[env] Missing required environment variable: ${name}. ` +
+        `Set it in apps/api/.env (see apps/api/.env.example).`,
+    );
+  }
+  return value;
+}
+
+/**
+ * A whole number with a safe default and an inclusive range. An out-of-range or
+ * non-numeric value is a configuration error, not something to clamp silently:
+ * `REVENUE_SHARE_MODEL_PCT=800` must crash the process, never pay a model 8x.
+ */
+function integerInRange(name: string, fallback: number, min: number, max: number): number {
+  const raw = (process.env[name] ?? '').trim();
+  if (raw === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new Error(
+      `[env] ${name}="${raw}" must be a whole number between ${min} and ${max}. ` +
         `Set it in apps/api/.env (see apps/api/.env.example).`,
     );
   }
@@ -75,6 +98,48 @@ export const env = {
 
   /** Public base URL the providers call back to with webhooks. */
   API_PUBLIC_URL: process.env.API_PUBLIC_URL ?? 'http://localhost:4000',
+
+  // ─── Payouts (Session 06) ─────────────────────────────────────────────────
+  // `PAYOUT_PROVIDER` picks the adapter and is read (and validated) in
+  // modules/payouts/provider.factory.ts, which crashes at boot on an unknown
+  // value rather than falling back.
+  //
+  // Paxum — model payouts. The Business account is still pending approval, so
+  // the credentials are only hard-required in production.
+  PAXUM_API_KEY: requiredInProduction('PAXUM_API_KEY', NODE_ENV),
+  PAXUM_IPN_SECRET: requiredInProduction('PAXUM_IPN_SECRET', NODE_ENV),
+  PAXUM_API_URL: process.env.PAXUM_API_URL ?? 'https://api.paxum.com',
+
+  /**
+   * Shared secret for POST /api/payouts/run. The caller is a scheduled job,
+   * not a logged-in admin, so there is no JWT to present — see the route for
+   * why. Required in production: an empty secret must not become an open
+   * endpoint, and the route rejects a blank configured secret outright.
+   */
+  PAYOUT_CRON_SECRET: requiredInProduction('PAYOUT_CRON_SECRET', NODE_ENV),
+
+  /** Model's cut of a confirmed subscription payment, as a whole percent. */
+  REVENUE_SHARE_MODEL_PCT: integerInRange(
+    'REVENUE_SHARE_MODEL_PCT',
+    DEFAULT_REVENUE_SHARE_MODEL_PCT,
+    0,
+    100,
+  ),
+
+  /** Minimum unpaid balance (minor units) a run will pay out. */
+  PAYOUT_MIN_THRESHOLD_CENTS: integerInRange(
+    'PAYOUT_MIN_THRESHOLD_CENTS',
+    DEFAULT_PAYOUT_MIN_THRESHOLD_CENTS,
+    1,
+    100_000_000,
+  ),
+
+  /**
+   * Currency Paxum settles payouts in. Earnings are summed in minor units
+   * without FX conversion, so a deployment selling in more than one currency
+   * needs the multi-currency work flagged in CLAUDE.md's Open Items first.
+   */
+  PAYOUT_CURRENCY: (process.env.PAYOUT_CURRENCY ?? 'BRL') as Currency,
 
   // Tunables with safe defaults.
   JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN ?? '15m',

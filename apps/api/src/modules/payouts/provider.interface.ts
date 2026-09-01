@@ -7,12 +7,11 @@
 // Collapsing them into one interface would force every payment adapter to
 // pretend it can send money.
 //
-// Contract only in Session 05 — no adapter, no HTTP, no env wiring.
-// TODO(Session 06): implement PaxumAdapter against the Paxum mass-payout REST
-// API and wire it behind a `PAYOUT_PROVIDER` env var, mirroring
-// modules/payments/provider.factory.ts.
+// Session 06 implements it: `PaxumAdapter` (live) and `MockPayoutProvider`
+// (deterministic, offline), selected by `PAYOUT_PROVIDER` in
+// modules/payouts/provider.factory.ts.
 // =============================================================================
-import type { Currency } from '@creator-platform/shared';
+import type { Currency, PayoutProviderName } from '@creator-platform/shared';
 import type { WebhookHeaders } from '../payments/provider.interface.js';
 
 /** Where one model's earnings are sent. Paxum addresses recipients by email. */
@@ -47,7 +46,7 @@ export interface PayoutItemResult {
 }
 
 export interface PayoutResult {
-  provider: string;
+  provider: PayoutProviderName;
   /** Provider-side handle for the whole batch, when it issues one. */
   providerBatchId: string | null;
   items: PayoutItemResult[];
@@ -55,7 +54,7 @@ export interface PayoutResult {
 
 /** Payout status callback, normalized the way payment events are. */
 export interface NormalizedPayoutEvent {
-  provider: string;
+  provider: PayoutProviderName;
   correlationId: string;
   providerPayoutId: string;
   status: PayoutStatus;
@@ -63,7 +62,7 @@ export interface NormalizedPayoutEvent {
 }
 
 export interface IPayoutProvider {
-  readonly name: string;
+  readonly name: PayoutProviderName;
 
   /** Send one batch of payouts. Must be idempotent on `correlationId`. */
   createPayout(params: PayoutParams): Promise<PayoutResult>;
@@ -77,4 +76,28 @@ export interface IPayoutProvider {
 
   /** Flatten a verified payout callback. */
   parseWebhookEvent(rawBody: Buffer): NormalizedPayoutEvent;
+}
+
+/**
+ * Thrown when a payout provider call fails. The run marks the `Payout` FAILED,
+ * releases its transactions back to the unpaid pool, and audits the reason —
+ * money is never left stuck in a half-claimed state.
+ */
+export class PayoutProviderError extends Error {
+  constructor(
+    readonly provider: PayoutProviderName,
+    message: string,
+    override readonly cause?: unknown,
+  ) {
+    super(message);
+    this.name = 'PayoutProviderError';
+  }
+}
+
+/** Thrown at boot when `PAYOUT_PROVIDER` names an adapter we don't have. */
+export class PayoutProviderConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PayoutProviderConfigError';
+  }
 }

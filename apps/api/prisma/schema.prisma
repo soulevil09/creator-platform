@@ -17,6 +17,12 @@
 // webhooks).
 // Session 05 adds the payments domain: Subscription, CreditWallet,
 // PaymentTransaction (idempotency-keyed) and AuditLog.
+// Session 06 adds revenue sharing and payouts (plus `ModelProfile.payoutEmail`,
+// the Paxum destination address): the model/platform split is
+// stamped onto each confirmed SUBSCRIPTION transaction, and Payout records one
+// weekly Paxum transfer. A model's payable balance is never a stored counter —
+// it is derived as SUM(modelShareCents) WHERE payoutId IS NULL, so the ledger
+// is the single source of truth and cannot drift from a cached total.
 // =============================================================================
 
 generator client {
@@ -64,8 +70,11 @@ model User {
   subscriptions       Subscription[]       @relation("SubscriberSubscriptions")
   subscribers         Subscription[]       @relation("ModelSubscribers")
   auditLogs           AuditLog[]
-  createdAt           DateTime             @default(now())
-  updatedAt           DateTime             @updatedAt
+
+  // Payouts (Session 06) — money out, to a MODEL's Paxum wallet.
+  payouts   Payout[] @relation("ModelPayouts")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 // ─── ModelProfile ────────────────────────────────────────────────────────────
@@ -86,6 +95,15 @@ model ModelProfile {
   aiConsent     Boolean   @default(false)
   aiConsentAt   DateTime?
   tosAcceptedAt DateTime?
+
+  // ─── Payout destination (Session 06 addendum) ─────────────────────────────
+  // Where Paxum sends this model's earnings. Deliberately NOT `User.email`:
+  // Paxum pays into a personal Paxum account, whose email need not match the
+  // platform login. UNIQUE because two models pointing at one Paxum address
+  // would misroute funds — the database refuses that outright rather than
+  // trusting an application-layer check. Null until the model sets it, which
+  // makes them skipped (never failed) by a payout run.
+  payoutEmail String? @unique
 
   referenceImages ReferenceImage[]
 
@@ -279,6 +297,21 @@ model PaymentTransaction {
   modelId String?
   tier    ContentTier?
 
+  // ─── Revenue share (Session 06) ───────────────────────────────────────────
+  // Stamped when a SUBSCRIPTION webhook confirms, from REVENUE_SHARE_MODEL_PCT.
+  // Remainder-to-platform rounding (`platform = amount - model`) so no cent is
+  // ever lost or invented. Null on CREDIT_PACK rows: credits are a wallet-wide
+  // balance with no per-model attribution until AI generation ships (Session
+  // 08), so there is nothing honest to split here yet.
+  modelShareCents    Int?
+  platformShareCents Int?
+
+  // Set when a payout run claims this row; null means "still payable". The
+  // claim is a conditional update (`WHERE payoutId IS NULL`), so two concurrent
+  // runs cannot both include the same earnings.
+  payoutId String?
+  payout   Payout? @relation(fields: [payoutId], references: [id], onDelete: SetNull)
+
   status      PaymentStatus @default(PENDING)
   confirmedAt DateTime?
   metadata    Json?
@@ -289,6 +322,74 @@ model PaymentTransaction {
   @@index([userId])
   @@index([status])
   @@index([providerTransactionId])
+  // The balance derivation (`WHERE modelId = ? AND payoutId IS NULL`) runs on
+  // every balance read and once per model per payout run.
+  @@index([modelId, payoutId])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Payouts domain (Session 06)
+//
+// Money out: the platform's weekly transfer of each model's revenue share to
+// their Paxum wallet. Provider-agnostic in the same way the payments domain is
+// — the row records which adapter produced it, but no Paxum-specific column
+// exists, so swapping IPayoutProvider implementations needs no migration.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Payout adapter identities. PAXUM_MOCK is the deterministic offline
+/// stand-in (`PAYOUT_PROVIDER=mock`), mirroring CCBILL_MOCK on the payments
+/// side.
+enum PayoutProvider {
+  PAXUM
+  PAXUM_MOCK
+}
+
+/// PENDING    — created and funded locally, not yet handed to the provider
+/// PROCESSING — the provider accepted the batch; awaiting its IPN
+/// COMPLETED  — the provider confirmed the money landed
+/// FAILED     — rejected; the included transactions were released back to the
+///              unpaid pool (payoutId reset to null) for the next run
+enum PayoutStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+// ─── Payout ──────────────────────────────────────────────────────────────────
+// One weekly transfer to one model. `amountCents` is not a free-standing
+// number: it always equals the sum of `modelShareCents` over the
+// PaymentTransaction rows pointing at this payout, which is what makes the
+// ledger auditable. `idempotencyKey` is minted locally and handed to the
+// provider as its correlation id, so the IPN echoes it back — the same round
+// trip that makes payment webhooks idempotent (Session 05).
+model Payout {
+  id      String @id @default(cuid())
+  modelId String
+  model   User   @relation("ModelPayouts", fields: [modelId], references: [id], onDelete: Cascade)
+
+  amountCents      Int
+  currency         String // "BRL" | "USD" | "EUR"
+  status           PayoutStatus   @default(PENDING)
+  provider         PayoutProvider
+  providerPayoutId String? // filled in when the provider accepts the batch
+  idempotencyKey   String         @unique
+
+  // Window of earnings this payout settles (informational: membership is
+  // decided by the payoutId stamp, not by a date range).
+  periodStart DateTime
+  periodEnd   DateTime
+
+  failureReason String? // provider-supplied; never contains a credential
+
+  transactions PaymentTransaction[]
+
+  createdAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  @@index([modelId])
+  @@index([status])
+  @@index([createdAt])
 }
 
 // ─── AuditLog ────────────────────────────────────────────────────────────────

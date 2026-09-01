@@ -12,6 +12,9 @@
 //     rejects with a P2002-shaped error, exactly as Postgres would.
 //   * `CreditWallet.balance` never goes negative — a conditional `updateMany`
 //     matches zero rows rather than writing a negative balance.
+//   * A `PaymentTransaction` can only be claimed by a payout while
+//     `payoutId IS NULL` — the conditional `updateMany` the payout run relies
+//     on to keep two concurrent runs from double-including a row.
 //
 // `$transaction(fn)` runs `fn` against this same client. It does NOT roll back
 // on throw; the tests that assert "nothing was mutated" exercise paths that
@@ -42,6 +45,9 @@ export interface FakeUser {
 export interface FakeProfile {
   id: string;
   userId: string;
+  /** Paxum destination address; null until the model sets one. UNIQUE. */
+  payoutEmail: string | null;
+  updatedAt: Date;
 }
 
 export interface FakeContent {
@@ -89,8 +95,32 @@ export interface FakeTransaction {
   status: FakePaymentStatus;
   confirmedAt: Date | null;
   metadata: unknown;
+  /** Revenue share (Session 06) — null on CREDIT_PACK rows. */
+  modelShareCents: number | null;
+  platformShareCents: number | null;
+  /** Null means "still payable"; set when a payout run claims the row. */
+  payoutId: string | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export type FakePayoutStatus = 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
+export type FakePayoutProvider = 'PAXUM' | 'PAXUM_MOCK';
+
+export interface FakePayout {
+  id: string;
+  modelId: string;
+  amountCents: number;
+  currency: string;
+  status: FakePayoutStatus;
+  provider: FakePayoutProvider;
+  providerPayoutId: string | null;
+  idempotencyKey: string;
+  periodStart: Date;
+  periodEnd: Date;
+  failureReason: string | null;
+  createdAt: Date;
+  completedAt: Date | null;
 }
 
 export interface FakeSubscription {
@@ -155,6 +185,7 @@ export function createFakePrisma() {
   const wallets: FakeWallet[] = [];
   const transactions: FakeTransaction[] = [];
   const subscriptions: FakeSubscription[] = [];
+  const payouts: FakePayout[] = [];
   const auditLogs: FakeAudit[] = [];
   let seq = 0;
   const nextId = (prefix: string) => `${prefix}_${++seq}`;
@@ -163,6 +194,41 @@ export function createFakePrisma() {
     (where.id !== undefined && u.id === where.id) ||
     (where.email !== undefined && u.email === where.email) ||
     (where.verifyToken !== undefined && u.verifyToken === where.verifyToken);
+
+  /**
+   * Match one transaction against the `where` shapes the code under test uses:
+   * scalar equality, `{ in: [...] }` on id, and an explicit `null` on payoutId
+   * (which is what makes the payout claim a compare-and-set).
+   */
+  const txMatches = (t: FakeTransaction, where: Where): boolean => {
+    for (const [key, condition] of Object.entries(where)) {
+      const value = (t as unknown as Record<string, unknown>)[key];
+      if (condition !== null && typeof condition === 'object' && !(condition instanceof Date)) {
+        const op = condition as { in?: unknown[]; not?: unknown };
+        if (Array.isArray(op.in) && !op.in.includes(value)) return false;
+        if ('not' in op) {
+          if (op.not === null && value === null) return false;
+          if (op.not !== null && value === op.not) return false;
+        }
+        continue;
+      }
+      if (value !== condition) return false;
+    }
+    return true;
+  };
+
+  const payoutMatches = (p: FakePayout, where: Where): boolean => {
+    for (const [key, condition] of Object.entries(where)) {
+      const value = (p as unknown as Record<string, unknown>)[key];
+      if (condition !== null && typeof condition === 'object' && !(condition instanceof Date)) {
+        const op = condition as { in?: unknown[] };
+        if (Array.isArray(op.in) && !op.in.includes(value)) return false;
+        continue;
+      }
+      if (value !== condition) return false;
+    }
+    return true;
+  };
 
   const findTx = (where: Where): FakeTransaction | undefined => {
     if (where.id !== undefined) return transactions.find((t) => t.id === where.id);
@@ -203,8 +269,30 @@ export function createFakePrisma() {
         profiles.find(
           (p) =>
             (where.userId !== undefined && p.userId === where.userId) ||
-            (where.id !== undefined && p.id === where.id),
+            (where.id !== undefined && p.id === where.id) ||
+            (where.payoutEmail !== undefined && p.payoutEmail === where.payoutEmail),
         ) ?? null,
+      update: async ({
+        where,
+        data,
+      }: {
+        where: { userId: string };
+        data: Partial<FakeProfile>;
+      }) => {
+        const row = profiles.find((p) => p.userId === where.userId);
+        if (!row) throw new Error('record not found');
+        // `payoutEmail` is UNIQUE: two models pointing at one Paxum address
+        // would misroute funds, so the constraint rejects here exactly as
+        // Postgres would rather than letting the service decide.
+        if (
+          data.payoutEmail != null &&
+          profiles.some((p) => p.userId !== where.userId && p.payoutEmail === data.payoutEmail)
+        ) {
+          throw new FakeUniqueConstraintError('payoutEmail');
+        }
+        Object.assign(row, data, { updatedAt: new Date() });
+        return row;
+      },
     },
 
     content: {
@@ -332,6 +420,9 @@ export function createFakePrisma() {
           status: 'PENDING',
           confirmedAt: null,
           metadata: null,
+          modelShareCents: null,
+          platformShareCents: null,
+          payoutId: null,
           ...data,
           id: nextId('tx'),
           createdAt: now,
@@ -347,18 +438,89 @@ export function createFakePrisma() {
         Object.assign(row, data, { updatedAt: new Date() });
         return row;
       },
-      updateMany: async ({
+      updateMany: async ({ where, data }: { where: Where; data: Record<string, unknown> }) => {
+        const matched = transactions.filter((t) => txMatches(t, where));
+        for (const row of matched) {
+          Object.assign(row, data, { updatedAt: new Date() });
+        }
+        return { count: matched.length };
+      },
+      findMany: async ({ where }: { where?: Where } = {}) =>
+        transactions.filter((t) => (where ? txMatches(t, where) : true)),
+      count: async ({ where }: { where?: Where } = {}) =>
+        transactions.filter((t) => (where ? txMatches(t, where) : true)).length,
+      /** Only the `_sum: { modelShareCents }` shape the balance query uses. */
+      aggregate: async ({ where }: { where?: Where } = {}) => {
+        const matched = transactions.filter((t) => (where ? txMatches(t, where) : true));
+        if (matched.length === 0) return { _sum: { modelShareCents: null } };
+        return {
+          _sum: {
+            modelShareCents: matched.reduce((sum, t) => sum + (t.modelShareCents ?? 0), 0),
+          },
+        };
+      },
+      /** Only the `by: ['modelId'] + _sum` shape the payout run uses. */
+      groupBy: async ({ where }: { by: string[]; where?: Where; _sum?: unknown }) => {
+        const matched = transactions.filter((t) => (where ? txMatches(t, where) : true));
+        const totals = new Map<string | null, number>();
+        for (const row of matched) {
+          totals.set(row.modelId, (totals.get(row.modelId) ?? 0) + (row.modelShareCents ?? 0));
+        }
+        return [...totals].map(([modelId, sum]) => ({
+          modelId,
+          _sum: { modelShareCents: sum },
+        }));
+      },
+    },
+
+    payout: {
+      create: async ({ data }: { data: Partial<FakePayout> & { idempotencyKey: string } }) => {
+        if (payouts.some((p) => p.idempotencyKey === data.idempotencyKey)) {
+          throw new FakeUniqueConstraintError('idempotencyKey');
+        }
+        const row = {
+          status: 'PENDING',
+          providerPayoutId: null,
+          failureReason: null,
+          completedAt: null,
+          ...data,
+          id: nextId('po'),
+          createdAt: new Date(),
+        } as FakePayout;
+        payouts.push(row);
+        return row;
+      },
+      findUnique: async ({ where }: { where: Where }) => {
+        if (where.id !== undefined) return payouts.find((p) => p.id === where.id) ?? null;
+        if (where.idempotencyKey !== undefined) {
+          return payouts.find((p) => p.idempotencyKey === where.idempotencyKey) ?? null;
+        }
+        return null;
+      },
+      findMany: async ({
         where,
-        data,
-      }: {
-        where: { idempotencyKey: string; status?: FakePaymentStatus };
-        data: Record<string, unknown>;
-      }) => {
-        const row = transactions.find((t) => t.idempotencyKey === where.idempotencyKey);
-        if (!row) return { count: 0 };
-        if (where.status !== undefined && row.status !== where.status) return { count: 0 };
-        Object.assign(row, data, { updatedAt: new Date() });
-        return { count: 1 };
+        skip = 0,
+        take,
+      }: { where?: Where; orderBy?: unknown; skip?: number; take?: number } = {}) => {
+        const matched = payouts
+          .filter((p) => (where ? payoutMatches(p, where) : true))
+          // Only the `createdAt: 'desc'` ordering the listing endpoint uses.
+          .slice()
+          .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+        return matched.slice(skip, take === undefined ? undefined : skip + take);
+      },
+      count: async ({ where }: { where?: Where } = {}) =>
+        payouts.filter((p) => (where ? payoutMatches(p, where) : true)).length,
+      update: async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
+        const row = payouts.find((p) => p.id === where.id);
+        if (!row) throw new Error('record not found');
+        Object.assign(row, data);
+        return row;
+      },
+      updateMany: async ({ where, data }: { where: Where; data: Record<string, unknown> }) => {
+        const matched = payouts.filter((p) => payoutMatches(p, where));
+        for (const row of matched) Object.assign(row, data);
+        return { count: matched.length };
       },
     },
 
@@ -430,6 +592,7 @@ export function createFakePrisma() {
     __wallets: wallets,
     __transactions: transactions,
     __subscriptions: subscriptions,
+    __payouts: payouts,
     __auditLogs: auditLogs,
   };
 
@@ -442,9 +605,16 @@ export function createFakeEmailer(): Emailer {
   return { sendVerificationEmail: vi.fn(async () => {}) };
 }
 
-/** Seed a ModelProfile so a model can be subscribed to. */
-export function seedProfile(prisma: FakePrisma, userId: string): void {
-  prisma.__profiles.push({ id: `mp_${userId}`, userId });
+/** Seed a ModelProfile so a model can be subscribed to (and, optionally, paid). */
+export function seedProfile(prisma: FakePrisma, userId: string, payoutEmail?: string): FakeProfile {
+  const row: FakeProfile = {
+    id: `mp_${userId}`,
+    userId,
+    payoutEmail: payoutEmail ?? null,
+    updatedAt: new Date(),
+  };
+  prisma.__profiles.push(row);
+  return row;
 }
 
 /** Seed a published Content row for a model. */
@@ -480,5 +650,61 @@ export function seedWallet(prisma: FakePrisma, userId: string, balance: number):
     updatedAt: now,
   };
   prisma.__wallets.push(row);
+  return row;
+}
+
+/**
+ * Seed a CONFIRMED subscription transaction already carrying its revenue split
+ * — i.e. exactly what a payment webhook leaves behind, which is the only input
+ * a payout run reads.
+ */
+export function seedEarning(
+  prisma: FakePrisma,
+  overrides: Partial<FakeTransaction> & { modelId: string; modelShareCents: number },
+): FakeTransaction {
+  const n = prisma.__transactions.length + 1;
+  const now = new Date();
+  const amount = overrides.amount ?? Math.round(overrides.modelShareCents / 0.8);
+  const row: FakeTransaction = {
+    id: `tx_seed_${n}`,
+    userId: `u_sub_${n}`,
+    type: 'SUBSCRIPTION',
+    provider: 'WOOVI',
+    providerTransactionId: `woovi_tx_seed_${n}`,
+    idempotencyKey: `sub_seed_${n}`,
+    amount,
+    currency: 'BRL',
+    creditsGranted: null,
+    tier: 'STANDARD',
+    status: 'CONFIRMED',
+    confirmedAt: now,
+    metadata: null,
+    platformShareCents: amount - overrides.modelShareCents,
+    payoutId: null,
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  };
+  prisma.__transactions.push(row);
+  return row;
+}
+
+/** Seed a MODEL user directly, for payout tests that don't need the auth flow. */
+export function seedModel(prisma: FakePrisma, id: string, email: string): FakeUser {
+  const now = new Date();
+  const row: FakeUser = {
+    id,
+    email,
+    passwordHash: 'seeded',
+    role: 'MODEL',
+    displayName: email,
+    isVerified: true,
+    verifyToken: null,
+    verifyTokenExpiresAt: null,
+    refreshTokenHash: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  prisma.__users.push(row);
   return row;
 }

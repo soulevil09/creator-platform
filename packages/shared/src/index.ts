@@ -241,3 +241,110 @@ export function isCurrency(value: string): value is Currency {
 export function isLocale(value: string): value is Locale {
   return (SUPPORTED_LOCALES as readonly string[]).includes(value);
 }
+
+// ─── Payouts (Session 06) ────────────────────────────────────────────────────
+/**
+ * Payout adapter identities, as persisted on every `Payout` row. `PAXUM_MOCK`
+ * is the deterministic offline stand-in (`PAYOUT_PROVIDER=mock`), mirroring
+ * the role `CCBILL_MOCK` plays on the payments side.
+ */
+export const PAYOUT_PROVIDERS = ['PAXUM', 'PAXUM_MOCK'] as const;
+export type PayoutProviderName = (typeof PAYOUT_PROVIDERS)[number];
+
+/**
+ * Lifecycle of one `Payout` row.
+ *
+ *   PENDING     — created and funded locally; not yet handed to the provider
+ *   PROCESSING  — the provider accepted the batch; awaiting its IPN
+ *   COMPLETED   — the provider confirmed the money landed
+ *   FAILED      — the provider rejected it; the included transactions were
+ *                 released back to the unpaid pool for the next run
+ *
+ * Distinct from `PayoutStatus` in `modules/payouts/provider.interface.ts`,
+ * which is the *provider's* three-state vocabulary (PENDING|PAID|FAILED)
+ * normalized out of an adapter. This one is our own record's state.
+ */
+export const PAYOUT_STATUSES = ['PENDING', 'PROCESSING', 'COMPLETED', 'FAILED'] as const;
+export type PayoutRecordStatus = (typeof PAYOUT_STATUSES)[number];
+
+/**
+ * Model's cut of a confirmed subscription payment, as a whole percent.
+ * 80/20 matches the OnlyFans/Fansly/Fanvue industry standard. Overridable per
+ * deployment via `REVENUE_SHARE_MODEL_PCT`.
+ */
+export const DEFAULT_REVENUE_SHARE_MODEL_PCT = 80;
+
+/**
+ * Minimum unpaid balance (minor units) a model must reach to be paid in a run.
+ * R$50. Below it the balance simply stays unclaimed and rolls into next week —
+ * that falls out of the balance query, so there is no carry-over bookkeeping.
+ */
+export const DEFAULT_PAYOUT_MIN_THRESHOLD_CENTS = 5000;
+
+/** Days one payout run covers. Weekly cadence, Monday 12:00 UTC. */
+export const PAYOUT_PERIOD_DAYS = 7;
+
+/** GET /api/payouts/balance — the caller's own balance, never anyone else's. */
+export type PayoutBalanceResponse = {
+  modelId: string;
+  /** SUM(modelShareCents) over confirmed, not-yet-paid subscription earnings. */
+  availableCents: number;
+  currency: Currency;
+  thresholdCents: number;
+  /** True when `availableCents` would be picked up by the next run. */
+  eligible: boolean;
+  /**
+   * Whether the model has set the Paxum address their earnings are sent to.
+   * False means a payout run will skip them however large the balance — the
+   * UI should prompt for it before they expect to be paid.
+   */
+  payoutEmailConfigured: boolean;
+};
+
+/** PUT /api/payouts/payout-email — confirmation of the new destination. */
+export type PayoutEmailResponse = {
+  modelId: string;
+  payoutEmail: string;
+  updatedAt: string;
+};
+
+/**
+ * POST /api/payouts/run — aggregate only. Deliberately carries no per-model
+ * identifiers or amounts: the caller is a cron job, not an authenticated
+ * admin, so the response must not become a payout-history oracle.
+ */
+export type PayoutRunSummary = {
+  processed: number;
+  skipped: number;
+  failed: number;
+  totalCents: number;
+};
+
+/** One row in an admin payout listing. */
+export type PayoutListItem = {
+  payoutId: string;
+  modelId: string;
+  amountCents: number;
+  currency: Currency;
+  status: PayoutRecordStatus;
+  provider: PayoutProviderName;
+  periodStart: string;
+  periodEnd: string;
+  createdAt: string;
+  completedAt: string | null;
+  failureReason: string | null;
+};
+
+/** GET /api/payouts — ADMIN-only paginated listing. */
+export type PayoutListResponse = {
+  payouts: PayoutListItem[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+/** GET /api/payouts/:payoutId — ADMIN or the owning MODEL. */
+export type PayoutDetailResponse = PayoutListItem & {
+  /** How many PaymentTransaction rows this payout settled. */
+  transactionCount: number;
+};

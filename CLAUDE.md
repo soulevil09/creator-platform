@@ -29,7 +29,7 @@ more robust/expensive services as revenue scales.
 | Payments (PIX/BR) | **Woovi (OpenPix)** | Brazilian fintech, CNPJ-backed, PCI DSS compliant. PIX nativo com liquidação imediata. Plano percentual: 0,80% por transação (mín R$0,50 / máx R$5,00). Zero setup/monthly fee. API REST documentada, webhooks em tempo real, SDK Node.js oficial. Conta PJ criada com MEI CNPJ 67.735.318/0001-91, chave PIX CNPJ vinculada ao Nubank PJ. |
 | Payments (crypto) | **NOWPayments** | 0.5% per transaction, zero setup/monthly fee. 350+ cryptocurrencies + stablecoins (USDT, USDC). Native subscription/recurring billing API. Adult content explicitly permitted by ToS. Forbes Advisor #1 crypto gateway 2025. Non-custodial option available. |
 | Payments (card — deferred) | _(CCBill — locked, post-MVP)_ | CCBill is the confirmed future card processor for international Visa/Mastercard. Requires Visa ($950/yr) + Mastercard ($500/yr) high-risk registration fees — deferred until platform generates enough revenue to absorb. Architecture is abstraction-ready on day one. |
-| Model payouts | Paxum mass payout REST API | Industry-standard for adult creator payouts. Automated weekly distribution via API. |
+| Model payouts | **Paxum** mass payout REST API | Industry-standard for adult creator payouts. Implemented Session 06 as `PaxumAdapter implements IPayoutProvider`, selected via `PAYOUT_PROVIDER`. Weekly run triggered by a GitHub Actions cron job hitting `POST /api/payouts/run` behind a timing-safe service secret. 80/20 split (model/platform), R$50 minimum threshold. Wire format is provisional until the Business account is approved — see Open Items. |
 | Lint / Format | ESLint 9 (flat) + Prettier | One root config governs all packages; modern TS standard. |
 | Tests | Vitest | ESM/TS-native, Jest-compatible, fast. In-memory mocks for DB + email in auth tests. |
 | CI | GitHub Actions | Free tier, native GitHub integration. |
@@ -49,7 +49,7 @@ more robust/expensive services as revenue scales.
 | Subscriber pays monthly subscription | Woovi PIX (BR) or Crypto (NOWPayments) | Grants access to model's content tier |
 | Subscriber buys credit pack | Woovi PIX (BR) or Crypto (NOWPayments) | Credits deposited to subscriber wallet |
 | Subscriber spends credits | Internal debit (no new payment) | Triggers AI image generation |
-| Platform pays model | Paxum API (weekly) | Platform % kept; model % sent via mass payout |
+| Platform pays model | Paxum API (weekly) | 80% model / 20% platform, split stamped on each confirmed SUBSCRIPTION transaction; paid Mondays 12:00 UTC above a R$50 threshold |
 | _(Future)_ Subscriber pays via card | CCBill (post-MVP) | Activates when Visa/MC registration fees are sustainable |
 
 ---
@@ -72,9 +72,12 @@ NOWPaymentsAdapter   implements IPaymentProvider  ← Crypto (global, via NOWPay
 CCBillAdapter        implements IPaymentProvider  ← Card (deferred/mocked at MVP; activates post-MVP)
 
 IPayoutProvider
-  └── sendMassPayouts(recipients[]) → PayoutResult
+  ├── createPayout(params) → PayoutResult
+  ├── verifyWebhookSignature(rawBody, headers) → boolean
+  └── parseWebhookEvent(rawBody) → NormalizedPayoutEvent
 
-PaxumPayoutAdapter   implements IPayoutProvider   ← model earnings distribution
+PaxumAdapter         implements IPayoutProvider   ← model earnings distribution
+MockPayoutProvider   implements IPayoutProvider   ← tests + PAYOUT_PROVIDER=mock
 
 MockPaymentProvider  implements IPaymentProvider  ← used in tests and for the deferred CCBill slot
 ```
@@ -230,15 +233,42 @@ The provider is selected at startup via env var and injected via the container. 
 
 ---
 
-### Session 06 — Revenue Sharing ⏳ Pending
+### Session 06 — Revenue Sharing & Payouts ✅ Complete
 **File:** `.claude/sessions/session-06.md`  
-**Domain:** Payout calculation, model balance tracking, Paxum API automated mass payouts
+**Domain:** 80/20 revenue split persisted per transaction, ledger-derived model balance, `PaxumAdapter` on the Session-05 `IPayoutProvider` contract, weekly cron-triggered payout run, Paxum IPN, minimal admin visibility
+
+**Summary:**
+- `Payout` model + `PayoutProvider` / `PayoutStatus` enums added to Prisma; `PaymentTransaction` gains `modelShareCents`, `platformShareCents`, `payoutId` (FK, `SetNull`) and an index on `(modelId, payoutId)`; `User` gains a `payouts` relation. Migration `20260901120000_add_payouts` **generated and applied** to Supabase (`prisma migrate deploy` — all 6 migrations now applied, including Session 05's).
+- Two CHECK constraints added manually in the migration (Prisma has no CHECK primitive): `PaymentTransaction_revenue_split_exhaustive` — either both shares are null (CREDIT_PACK) or they are non-negative and sum to exactly `amount` — and `Payout_amount_positive`.
+- `computeRevenueSplit` (`modules/payouts/revenue.ts`) — `modelShareCents = round(amount × pct / 100)`, `platformShareCents = amount − modelShareCents`. Remainder-to-platform, so no cent is ever lost or invented at any amount or percentage.
+- Session 05's webhook confirmation `$transaction` extended: a confirmed **SUBSCRIPTION** stamps the split onto the transaction row (and into the `subscription.activated` audit metadata) in the same transaction that grants access. `CREDIT_PACK` rows leave both shares null. All 109 Session-05 tests still pass unmodified.
+- **Balance is derived, never stored** — `SUM(modelShareCents) WHERE modelId = ? AND payoutId IS NULL AND type = 'SUBSCRIPTION' AND status = 'CONFIRMED'`. Paying a model is a *claim* (stamping `payoutId`), not a decrement, so there is no counter to drift.
+- `GET /api/payouts/balance` — `authenticate` + `authorize('model')`, userId from the JWT only; returns `{ modelId, availableCents, currency, thresholdCents, eligible }`.
+- `PaxumAdapter implements IPayoutProvider` — `createPayout` (batch submit, recipients addressed by Paxum email, minor units formatted as a decimal string), `verifyWebhookSignature` (HMAC-SHA256 hex over the raw body, constant-time), `parseWebhookEvent`. **Field/header names are provisional** — see Open Items.
+- `MockPayoutProvider implements IPayoutProvider` — deterministic, zero HTTP; `PAYOUT_PROVIDER=mock` for local dev, mirroring `MockPaymentProvider`.
+- `modules/payouts/provider.factory.ts` — `getPayoutProvider()` reads `PAYOUT_PROVIDER`, memoises, throws `PayoutProviderConfigError` on an unknown value; `assertPayoutProviderConfigured()` runs in `buildServer` so a typo crashes at boot.
+- `POST /api/payouts/run` — guarded by the `X-Payout-Cron-Secret` header compared with `crypto.timingSafeEqual` (never `===`), rejected 401 before any DB access, rate-limited 2/hour. Groups unclaimed earnings per model in one `groupBy`, skips anything below `PAYOUT_MIN_THRESHOLD_CENTS`, and processes the rest in chunks of 10 via `Promise.allSettled`. Per model: one `$transaction` creates the `PENDING` `Payout` and claims its rows with `updateMany({ where: { id: { in: ids }, payoutId: null } })` — a count mismatch aborts the whole transaction. Provider failure → `Payout` FAILED + `AuditLog` + every attached `payoutId` reset to null, so the balance is payable again next run. Response is aggregate only: `{ processed, skipped, failed, totalCents }`.
+- `POST /api/payouts/paxum/webhook` — plugin-scoped raw-body parser (same pattern as payments), signature verified before the first DB statement, 400 on mismatch. `PAID` → conditional `updateMany` (`status IN (PENDING, PROCESSING)`) → `COMPLETED`; `REJECTED` → `FAILED` + release. Replays and unknown correlation ids answer 200 with no side effects.
+- `GET /api/payouts` (ADMIN, paginated) and `GET /api/payouts/:payoutId` (ADMIN or the owning MODEL — another model's payout is a **404, not a 403**, so payout ids are not enumerable).
+- `.github/workflows/weekly-payout.yml` — `cron: '0 12 * * 1'` (Monday 12:00 UTC), `workflow_dispatch` for a missed week, `concurrency` guard, secret read from the environment so it never reaches the run log.
+- Shared: `PAYOUT_PROVIDERS`, `PAYOUT_STATUSES`, `PayoutRecordStatus`, `DEFAULT_REVENUE_SHARE_MODEL_PCT`, `DEFAULT_PAYOUT_MIN_THRESHOLD_CENTS`, `PAYOUT_PERIOD_DAYS`, `PayoutBalanceResponse`, `PayoutRunSummary`, `PayoutListItem`, `PayoutListResponse`, `PayoutDetailResponse`.
+- 50 new tests (159 total, zero regressions); `pnpm turbo run typecheck lint test build` all green.
+
+**Notes / deviations:**
+- **The payout factory lives in `modules/payouts/provider.factory.ts`, not in the payments one.** The spec said "extend `provider.factory.ts`"; extending the payments factory would have made the payments module import a payout adapter, which breaks the money-in/money-out separation the two interfaces exist to enforce. The payouts factory mirrors the payments one line for line — same memoisation, same boot-time assert, same "unknown name crashes rather than falls back".
+- **`modules/payouts/adapters/http.ts` deliberately duplicates its payments sibling** rather than importing it: the payments version is typed to `PaymentProviderName` and throws `PaymentProviderError`, and the two error taxonomies are meaningfully different (a failed charge is a 502 to a waiting subscriber; a failed payout rolls a claim back inside a cron run). The signature helpers (`hmac`/`safeEquals`/`headerValue`) *are* reused — they are pure crypto utilities with no payments coupling.
+- **Recipient address = the model's platform account email.** Paxum addresses recipients by the email on their personal Paxum account; there is no `payoutEmail` field on `ModelProfile` yet, and adding one would need an onboarding endpoint that is out of this session's scope. Flagged as an Open Item.
+- **`Payout.status` (`PENDING|PROCESSING|COMPLETED|FAILED`) is our record's state; `PayoutStatus` in `provider.interface.ts` (`PENDING|PAID|FAILED`) is the provider's normalized vocabulary.** They are deliberately distinct — the shared type for ours is `PayoutRecordStatus`.
+- **A model whose account has vanished is counted as `skipped`, not `failed`** — the `Payout.modelId` FK means no row can be created for them, so there is nothing to fail. It writes a `payout.skipped_no_recipient` audit entry.
+- **`/run` returns aggregates only.** No model ids, no per-model amounts: the caller is a machine holding a shared secret, so the response must not double as a payout-history oracle.
+- **ARIA validation:** this session ships no frontend UI. `eslint-plugin-jsx-a11y` (added in Session 05) still runs over `**/*.tsx` in CI with zero findings — lint is green.
 
 **External Prerequisites:**
 - [ ] Create Paxum Business account: https://www.paxum.com → sign up as Business
   - Enable mass payout API: contact Paxum support to activate REST API access
   - Each model must also have a personal Paxum account (their email is used as payout recipient)
   - Get `PAXUM_API_KEY` and `PAXUM_IPN_SECRET` from Merchant Services → IPN Settings
+- [ ] Generate `PAYOUT_CRON_SECRET` (`openssl rand -hex 32`) and store it, plus `API_PUBLIC_URL`, as GitHub Actions repository secrets
 
 ---
 
@@ -367,6 +397,24 @@ _Session 05 — payments implementation decisions:_
 
 - **Checkout rate limits key on `userId`, not IP.** Two subscribers behind one NAT must not exhaust each other's budget, and one account must not earn a fresh budget per IP.
 
+_Session 06 — payouts implementation decisions:_
+
+- **A model's balance is a query, not a column.** `SUM(modelShareCents) WHERE modelId = ? AND payoutId IS NULL` is the whole definition of "what we owe you". Paying is a *claim* — stamping `payoutId` onto the rows that funded the payout — never a decrement of a counter. A counter can drift from the rows that justify it, and reconciling a drifted financial counter after the fact is not something a weekly cron job can do. Same ledger-over-counter reasoning as Session 05's `debitCredits`, applied to money out.
+
+- **The split is stamped at confirmation, not computed at payout time.** `modelShareCents`/`platformShareCents` are written in the same `$transaction` that confirms the payment, so the row records what was owed under the terms in force *then*. Changing `REVENUE_SHARE_MODEL_PCT` next month therefore cannot silently rewrite what a model already earned. Rounding is remainder-to-platform (`platform = amount − model`), backed by a CHECK constraint, so no cent leaks or is invented.
+
+- **Claiming is compare-and-set, and failure releases the claim.** The run creates the `Payout` and claims its transactions in one `$transaction` with `updateMany({ where: { id: { in: ids }, payoutId: null } })`; if the matched count differs from what was selected, another run got there first and the whole transaction aborts. If the provider then rejects the batch, the `Payout` goes FAILED and every `payoutId` is reset to null — the earnings simply reappear in next week's balance. There is no state in which money is claimed but unpayable.
+
+- **`/payouts/run` is guarded by a service secret, not an admin JWT.** The caller is a GitHub Actions cron job: it has no user session, so it has no JWT to present and no way to get one without holding a real admin password — and there is no admin auth or dashboard yet (Session 11). A shared secret in a header authenticates the *machine* honestly, is compared with `crypto.timingSafeEqual`, rejects before any DB access, is rate-limited 2/hour so a leaked secret cannot trigger unlimited runs, and rotates in one GitHub secret.
+
+- **Below-threshold balances need no carry-over bookkeeping.** A model under `PAYOUT_MIN_THRESHOLD_CENTS` is skipped, their rows keep `payoutId = null`, and the same balance query picks them up next week. The carry-over falls out of the ledger rather than being a second thing to maintain.
+
+- **Models are processed in chunks of 10 via `Promise.allSettled`** — not sequentially (one slow Paxum call would stall the run) and not all at once (a thousand models would open a thousand sockets and trip the provider's rate limits). One failing model is one `failed` in the summary, not a dead run.
+
+- **Credit-pack revenue is deliberately out of the split.** Credits are a wallet-wide balance with no per-model attribution until AI generation ships (Session 08), so there is nothing honest to split; `CREDIT_PACK` rows leave both shares null rather than carrying an invented number.
+
+- **`PaxumAdapter` ships pre-approval, like Woovi and NOWPayments did.** The Business account is not approved, so the wire format is written against Paxum's publicly documented mass-payout mechanics and exercised only against `nock`. Every provisional name is marked as such in the adapter and tracked as an Open Item. What is *not* provisional is the seam: correcting a field name later touches one class.
+
 _Post-Session 05 — scope correction:_
 
 - **PPV was scaffolded in Session 04 but is out of product scope (see original brief) — removed in a post-Session-05 correction; access to PREMIUM content is subscription-only.** `Content.ppvPriceCents` dropped (migration `20260831025136_remove_ppv`), the `ppv_purchase` grant reason retired, and `resolveAccess` now admits PREMIUM on `subscription_premium` alone (owner/admin unchanged).
@@ -393,7 +441,7 @@ _Pre-Session 05 — payment stack decisions (Stripe permanently excluded):_
 
 - **Credit wallet model** — credits are an internal currency. `CreditWallet` table tracks balance per user. Purchase (Woovi PIX webhook / NOWPayments IPN) → credit balance up. AI image generation → credit balance down. No payment triggered at generation time. Subscription grants → `ContentAccess` rows via `grantContentAccess`.
 
-**Swap-readiness notes:** DB provider swappable behind Prisma; AI provider behind `AI_PROVIDER` env switch; storage behind S3-compatible env vars; email provider behind the `Emailer` interface; image processing behind the `ImageProcessor` interface; PIX payment provider behind `IPaymentProvider` (`PAYMENT_PROVIDER_PIX` env); crypto payment provider behind `IPaymentProvider` (`PAYMENT_PROVIDER_CRYPTO` env); card payment provider behind `IPaymentProvider` (`PAYMENT_PROVIDER_CARD` env, mocked until CCBill activation); payout provider behind `IPayoutProvider` (contract only until Session 06). All three payment channels were exercised through the abstraction in Session 05: swapping `PAYMENT_PROVIDER_PIX` from `woovi` to `mock` changes the adapter class and nothing else.
+**Swap-readiness notes:** DB provider swappable behind Prisma; AI provider behind `AI_PROVIDER` env switch; storage behind S3-compatible env vars; email provider behind the `Emailer` interface; image processing behind the `ImageProcessor` interface; PIX payment provider behind `IPaymentProvider` (`PAYMENT_PROVIDER_PIX` env); crypto payment provider behind `IPaymentProvider` (`PAYMENT_PROVIDER_CRYPTO` env); card payment provider behind `IPaymentProvider` (`PAYMENT_PROVIDER_CARD` env, mocked until CCBill activation); payout provider behind `IPayoutProvider` (`PAYOUT_PROVIDER` env — `PaxumAdapter` / `MockPayoutProvider`, Session 06). All three payment channels were exercised through the abstraction in Session 05: swapping `PAYMENT_PROVIDER_PIX` from `woovi` to `mock` changes the adapter class and nothing else.
 
 ---
 
@@ -431,16 +479,30 @@ creator-platform/
 │       │   │   │   ├── onboarding.service.ts
 │       │   │   │   ├── onboarding.schema.ts
 │       │   │   │   └── onboarding.test.ts   # 21 tests
-│       │   │   └── content/
-│       │   │       ├── content.routes.ts
-│       │   │       ├── content.service.ts
-│       │   │       ├── content.schema.ts
-│       │   │       └── content.test.ts      # 15 tests
+│       │   │   ├── content/
+│       │   │   │   ├── content.routes.ts
+│       │   │   │   ├── content.service.ts
+│       │   │   │   ├── content.schema.ts
+│       │   │   │   └── content.test.ts      # 15 tests
+│       │   │   ├── wallet/                  # credit wallet (Session 05)
+│       │   │   ├── payments/                # money IN (Session 05)
+│       │   │   │   ├── adapters/            # woovi, nowpayments, mock, http, signature
+│       │   │   │   ├── provider.interface.ts + provider.factory.ts
+│       │   │   │   ├── payments.routes.ts / .service.ts / .schema.ts
+│       │   │   │   └── payments.test.ts     # 41 tests
+│       │   │   └── payouts/                 # money OUT (Session 06)
+│       │   │       ├── adapters/            # paxum, mock, http
+│       │   │       ├── provider.interface.ts + provider.factory.ts
+│       │   │       ├── revenue.ts           # computeRevenueSplit (80/20)
+│       │   │       ├── payouts.routes.ts / .service.ts / .schema.ts
+│       │   │       └── payouts.test.ts      # 50 tests
+│       │   ├── test/
+│       │   │   └── fake-prisma.ts           # shared in-memory Prisma stand-in
 │       │   └── types/
 │       │       └── fastify-jwt.d.ts
 │       ├── prisma/
-│       │   ├── schema.prisma        # User, ModelProfile, Content, payments models + enums
-│       │   ├── migrations/          # …_add_user_model, …_add_model_profile, …_add_content_management, …_add_payments
+│       │   ├── schema.prisma        # User, ModelProfile, Content, payments + Payout models + enums
+│       │   ├── migrations/          # …_add_user_model, …_add_model_profile, …_add_content_management, …_add_payments, …_remove_ppv, …_add_payouts
 │       │   └── generated/           # Prisma client output (gitignored)
 │       ├── scripts/
 │       │   └── postinstall.mjs
@@ -451,7 +513,9 @@ creator-platform/
 ├── packages/
 │   └── shared/                      # Framework-free types/constants/utils
 │       └── src/index.ts             # Role, JwtPayload, AuthUser + locale/currency constants
-├── .github/workflows/ci.yml
+├── .github/workflows/
+│   ├── ci.yml
+│   └── weekly-payout.yml            # Mon 12:00 UTC → POST /api/payouts/run
 ├── .claude/sessions/
 ├── tsconfig.base.json
 ├── turbo.json
@@ -500,8 +564,14 @@ All `.env*` files are gitignored; examples contain placeholders only.
 | `CCBILL_SALT` | api | _post-MVP_ | CCBill webhook HMAC salt — deferred |
 | `CCBILL_API_USERNAME` | api | _post-MVP_ | CCBill REST API username — deferred |
 | `CCBILL_API_PASSWORD` | api | _post-MVP_ | CCBill REST API password — deferred |
+| `PAYOUT_PROVIDER` | api | 06 | Active payout adapter: `paxum` (or `mock` for offline dev) |
 | `PAXUM_API_KEY` | api | 06 | Paxum REST API key for mass payouts |
 | `PAXUM_IPN_SECRET` | api | 06 | Paxum IPN shared secret for webhook validation |
+| `PAXUM_API_URL` | api | 06 | Paxum API base URL (default `https://api.paxum.com`) |
+| `PAYOUT_CRON_SECRET` | api | 06 | Shared secret for `POST /api/payouts/run` (timing-safe compare); mirrored as a GitHub Actions repo secret |
+| `REVENUE_SHARE_MODEL_PCT` | api | 06 | Model's cut of a confirmed subscription, whole percent (default `80`) |
+| `PAYOUT_MIN_THRESHOLD_CENTS` | api | 06 | Minimum payable balance in minor units (default `5000` = R$50) |
+| `PAYOUT_CURRENCY` | api | 06 | Currency Paxum settles payouts in (default `BRL`) |
 | `AI_PROVIDER` / `AI_PROVIDER_API_KEY` | api | 08 | AI image provider switch + key (Replicate) |
 | `NEXT_PUBLIC_APP_URL` / `NEXT_PUBLIC_API_URL` | web | — | Public URLs for the web app |
 | `NEXT_PUBLIC_DEFAULT_LOCALE` | web | 10 | Default UI locale (`pt-BR` \| `en`) |
@@ -518,18 +588,23 @@ All `.env*` files are gitignored; examples contain placeholders only.
 - **Content uploads buffer the full file into memory before storage write** (Session 04) — acceptable at MVP; true streaming needs the S3 multipart upload API (deferred).
 - **Soft-deleted content objects are left in storage** (Session 04) — a cleanup job to purge `deletedAt` rows' objects is deferred (Session 09/12 candidate).
 - **Locked-teaser listing deferred** (Session 04) — the list endpoint hides inaccessible gated content rather than returning it with a null thumbnail; revisit if the UI wants upsell teasers.
-- **⚠️ Session 05 migration not yet applied** — `20260830120000_add_payments` was generated offline with `prisma migrate diff` because the Supabase host (`db.cwlewexnhmfyamvpubio.supabase.co:5432`) was unreachable during the session (free-tier projects pause after inactivity). The SQL is committed and correct against the schema, but **must be applied before the payments endpoints will work against a real DB**: resume the Supabase project, then run `cd apps/api && npx prisma migrate deploy` (or `migrate dev` to also refresh the shadow history). All 107 tests run against an in-memory Prisma fake and are unaffected.
+- ~~**Session 05 migration not yet applied**~~ — **resolved in Session 06.** The Supabase host was reachable again; `npx prisma migrate deploy` applied `20260830120000_add_payments`, `20260831025136_remove_ppv` and `20260901120000_add_payouts`. `prisma migrate status` reports all 6 migrations applied.
 - **Provider request/response shapes need live verification** (Session 05) — the Woovi and NOWPayments adapters were written against published API docs and exercised only against nock-mocked HTTP, because neither merchant account is approved yet. Re-verify field names (`charge.brCode`, `charge.transactionID`, `pay_address`, `pay_amount`, the `x-webhook-signature` / `x-nowpayments-sig` schemes) against a live sandbox charge before going to production.
+- **Paxum request/response shapes need live verification** (Session 06) — the `PaxumAdapter` was written against Paxum's publicly documented mass-payout *mechanics* (Paxum-to-Paxum P2P by recipient email, batch submit, asynchronous IPN confirmation, major-unit decimal amounts) and exercised only against nock-mocked HTTP, because the Business account is not approved yet. **These are provisional, not confirmed fact:** the `POST /v1/mass-payouts` path, the `x-api-key` auth header, the request keys (`payments[].correlationId` / `recipientEmail` / `amount` / `currency`, `callbackUrl`), the response keys (`batchId`, `payments[].transactionId` / `status` / `errorMessage`), the `x-paxum-signature` header, and the HMAC-SHA256-hex-over-raw-body IPN scheme. Re-verify every one against a live sandbox batch before production. All of it is confined to `paxum.adapter.ts` behind `IPayoutProvider`.
+- **Models are paid at their platform account email** (Session 06) — Paxum addresses recipients by the email on their personal Paxum account, which may differ from their login email. A `payoutEmail` field on `ModelProfile` plus an onboarding endpoint to set it is needed before real transfers; until then a model whose Paxum email differs will have their payout rejected (which fails safely — the `Payout` goes FAILED and the balance is released back).
+- **Payout earnings are summed in minor units without FX conversion** (Session 06) — the balance query sums `modelShareCents` across currencies, and a claim whose rows disagree falls back to `PAYOUT_CURRENCY`. Harmless while PIX/BRL dominates; a model earning in both BRL (PIX) and USD (crypto) needs per-currency payouts and an FX policy. Candidate: Session 11 alongside the admin dashboard.
+- **Credit-pack revenue is not shared with models** (Session 06, by design) — credits are a wallet-wide balance with no per-model attribution until AI generation ships. Extending payouts to cover credit spend is explicit Session 08 follow-up work, once generation events carry a `modelId`.
+- **No `Payout` reconciliation job** (Session 06) — a `PROCESSING` payout whose IPN never arrives stays `PROCESSING` forever; there is no sweeper that re-queries Paxum for stale batches. Add one when real volume exists (Session 11/12 candidate).
 - **Subscription renewal and cancellation are not implemented** (Session 05) — a confirmed payment activates a 30-day period and grants `ContentAccess` rows that expire with it, so a lapse revokes access on its own. What is missing is the renewal charge, `POST /cancel`, and handling of `PAST_DUE`. Candidate: Session 06 alongside payouts.
 - **Content published after a subscription starts is not auto-granted** (Session 05) — `ContentAccess` rows are written at confirmation time for the model's then-published catalogue. New uploads mid-period need either a grant-on-publish hook or a subscription-aware check in `resolveAccess`. Revisit when upload cadence matters.
 - **Woovi adult content policy** — Woovi/OpenPix é um gateway PIX brasileiro regulado. Antes de ir ao ar em produção com conteúdo explícito adulto, confirmar com o suporte deles (suporte@woovi.com) se aceitam plataformas adult 18+. PIX em si não tem restrição de conteúdo (é infraestrutura do Banco Central), mas o gateway pode ter política própria.
 - **CCBill deferred to post-MVP** — $1,450/yr Visa+MC registration fees make card processing financially unviable at MVP stage. CCBill slot is scaffolded as `MockPaymentProvider`. Activate when monthly revenue covers the annual fee.
 - **NOWPayments crypto-to-fiat conversion** — NOWPayments settles in cryptocurrency. To receive BRL/USD fiat, platform must maintain exchange accounts (Bybit/OKX/Binance) and execute regular USDT→fiat withdrawals. This is an operational step outside the codebase.
 - **Lei FELCA compliance (Brazil)** — Lei 15.211/2025 requires adult platforms to implement CPF + Face ID age verification by 17/03/2026. Penalties: up to R$50M or 10% of annual Brazil revenue. Must be scoped into a future session (candidate: Session 09 or a new Session 9.5). ANPD is the enforcement authority.
-- **Paxum → Woovi/NOWPayments wire** — model payouts via Paxum require platform to accumulate earnings from Woovi and NOWPayments, then fund the Paxum business account. This is a manual treasury step outside the codebase; document the SOP before Session 06.
+- **Paxum → Woovi/NOWPayments wire** — model payouts via Paxum require the platform to accumulate earnings from Woovi and NOWPayments, then fund the Paxum business account. Still a manual treasury step outside the codebase (Session 06 automates the *distribution*, not the *funding*); document the SOP before the first live run.
 - **MEI faturamento limit** — MEI CNPJ 67.735.318/0001-91 has R$130k/year revenue cap. When platform revenue approaches this threshold, migrate to ME (Microempresa) with a contador. This unlocks higher volume and formal payroll if needed.
 - **Telegram Stars** — optional secondary channel for microtransactions on Telegram bots. ~32% effective fee on mobile purchases. 21-day withdrawal hold. iOS restrictions on adult content via Stars. Not a primary payment channel — integrate only if there is an active Telegram community.
 
 ---
 
-## Last Updated — Session 05 complete: payments (Woovi PIX + NOWPayments crypto adapters, IPaymentProvider abstraction, webhooks, credit wallet, IPayoutProvider contract). 107 tests green. Payments migration generated but NOT yet applied — Supabase host was unreachable [2026-08-30]
+## Last Updated — Session 06 complete: revenue sharing & payouts (80/20 split stamped per confirmed subscription, ledger-derived model balance, `PaxumAdapter` + `MockPayoutProvider` on `IPayoutProvider`, weekly cron-triggered payout run with compare-and-set claiming and failure rollback, Paxum IPN, admin payout visibility). 159 tests green. Migration `20260901120000_add_payouts` generated **and applied** — all 6 migrations now live on Supabase [2026-09-01]

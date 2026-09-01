@@ -31,3 +31,12 @@ process.env.NOWPAYMENTS_API_KEY ??= 'test-nowpayments-api-key';
 process.env.NOWPAYMENTS_IPN_SECRET ??= 'test-nowpayments-ipn-secret';
 process.env.NOWPAYMENTS_API_URL ??= 'https://nowpayments.test';
 process.env.API_PUBLIC_URL ??= 'http://localhost:4000';
+
+// Payout provider + cron secret (Session 06). Same posture as the payment
+// credentials above: the Paxum adapter is exercised only through nock, and the
+// API base URL points at a host that exists solely in nock's interceptor table.
+process.env.PAYOUT_PROVIDER ??= 'paxum';
+process.env.PAXUM_API_KEY ??= 'test-paxum-api-key';
+process.env.PAXUM_IPN_SECRET ??= 'test-paxum-ipn-secret';
+process.env.PAXUM_API_URL ??= 'https://paxum.test';
+process.env.PAYOUT_CRON_SECRET ??= 'test-payout-cron-secret';

@@ -1,0 +1,55 @@
+# Weekly model payout run.
+#
+# Why a cron job hitting an HTTP endpoint rather than a job that talks to the
+# database directly: the payout logic (claim → send → record, with rollback on
+# provider failure) lives in the API, behind one transactional service. A second
+# code path into the same money would be a second place to get idempotency
+# wrong. This workflow's whole job is to say "now".
+#
+# Auth is the shared secret `PAYOUT_CRON_SECRET`, compared in constant time by
+# the endpoint. A cron job has no user session, so it has no JWT to present —
+# and there is no admin auth yet either (Session 11). Both secrets live in
+# GitHub Actions repository secrets and are never echoed: `curl` reads the
+# header value from the environment, so it never appears in the run log.
+name: Weekly payout
+
+on:
+  schedule:
+    # Mondays at 12:00 UTC (09:00 BRT). Cron in GitHub Actions is best-effort —
+    # a run may start late under load, which is harmless here: the run pays
+    # whatever the ledger says is unpaid, so a delay shifts the moment, not the
+    # amount.
+    - cron: '0 12 * * 1'
+  # Manual trigger for a missed or re-run week.
+  workflow_dispatch:
+
+# Never let two runs overlap. The claim is compare-and-set so a double run
+# cannot double-pay, but there is no reason to make the database arbitrate.
+concurrency:
+  group: weekly-payout
+  cancel-in-progress: false
+
+jobs:
+  payout:
+    name: Trigger payout run
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /api/payouts/run
+        env:
+          API_PUBLIC_URL: ${{ secrets.API_PUBLIC_URL }}
+          PAYOUT_CRON_SECRET: ${{ secrets.PAYOUT_CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "${API_PUBLIC_URL}" ] || [ -z "${PAYOUT_CRON_SECRET}" ]; then
+            echo "::error::API_PUBLIC_URL and PAYOUT_CRON_SECRET must be set as repository secrets."
+            exit 1
+          fi
+          # --fail-with-body so a non-2xx exits non-zero (the run turns red)
+          # while still printing what the API said. The summary body carries
+          # only aggregate counts — no model ids, no amounts per model.
+          curl --silent --show-error --fail-with-body \
+            --max-time 300 \
+            -X POST "${API_PUBLIC_URL}/api/payouts/run" \
+            -H "X-Payout-Cron-Secret: ${PAYOUT_CRON_SECRET}" \
+            -H 'Content-Type: application/json' \
+            | tee "$GITHUB_STEP_SUMMARY"

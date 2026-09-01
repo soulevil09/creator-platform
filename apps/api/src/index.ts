@@ -31,6 +31,13 @@ import {
   assertPaymentProvidersConfigured,
   getPaymentProvider,
 } from './modules/payments/provider.factory.js';
+import { createPayoutsService } from './modules/payouts/payouts.service.js';
+import payoutRoutes from './modules/payouts/payouts.routes.js';
+import {
+  assertPayoutProviderConfigured,
+  getPayoutProvider,
+} from './modules/payouts/provider.factory.js';
+import type { IPayoutProvider } from './modules/payouts/provider.interface.js';
 
 /** Max reference-image upload size, shared by the multipart limit (10 MB). */
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
@@ -48,6 +55,8 @@ export interface BuildServerOptions {
   images?: ImageProcessor;
   /** Override the payment-provider factory (tests inject stub adapters). */
   getPaymentProvider?: (channel: PaymentChannel) => IPaymentProvider;
+  /** Override the payout-provider factory (tests inject a stub adapter). */
+  getPayoutProvider?: () => IPayoutProvider;
 }
 
 export async function buildServer(opts: BuildServerOptions = {}) {
@@ -56,11 +65,17 @@ export async function buildServer(opts: BuildServerOptions = {}) {
   const storage = opts.storage ?? createS3StorageClient();
   const images = opts.images ?? createSharpImageProcessor();
   const getProvider = opts.getPaymentProvider ?? getPaymentProvider;
+  const getPayoutAdapter = opts.getPayoutProvider ?? getPayoutProvider;
 
   // Fail fast: an unknown PAYMENT_PROVIDER_* value must stop the process here,
   // not surface later as a failed checkout in production.
   if (!opts.getPaymentProvider) {
     assertPaymentProvidersConfigured();
+  }
+  // Same for PAYOUT_PROVIDER — a typo must not surface as a weekly payout run
+  // that quietly does nothing.
+  if (!opts.getPayoutProvider) {
+    assertPayoutProviderConfigured();
   }
 
   const app = Fastify({ logger: env.NODE_ENV !== 'test' });
@@ -142,8 +157,17 @@ export async function buildServer(opts: BuildServerOptions = {}) {
     // this one primitive.
     grantContentAccess: contentService.grantContentAccess,
     getProvider,
+    revenueShareModelPct: env.REVENUE_SHARE_MODEL_PCT,
   });
   await app.register(paymentRoutes, { prefix: '/api/payments', service: paymentsService });
+
+  const payoutsService = createPayoutsService({
+    prisma,
+    getProvider: getPayoutAdapter,
+    minThresholdCents: env.PAYOUT_MIN_THRESHOLD_CENTS,
+    payoutCurrency: env.PAYOUT_CURRENCY,
+  });
+  await app.register(payoutRoutes, { prefix: '/api/payouts', service: payoutsService });
 
   return app;
 }

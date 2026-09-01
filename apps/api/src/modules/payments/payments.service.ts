@@ -25,13 +25,22 @@
 //
 // ── Atomicity ───────────────────────────────────────────────────────────────
 // The claim, the wallet credit (or subscription upsert + ContentAccess grants),
-// and the audit row all run inside one `prisma.$transaction`. There is no
-// instant at which a transaction reads CONFIRMED but the thing it paid for
-// has not been granted.
+// the revenue split, and the audit row all run inside one `prisma.$transaction`.
+// There is no instant at which a transaction reads CONFIRMED but the thing it
+// paid for has not been granted.
+//
+// ── Revenue share (Session 06) ──────────────────────────────────────────────
+// A confirmed SUBSCRIPTION also stamps `modelShareCents`/`platformShareCents`
+// onto the row, in the same transaction. The split is recorded at confirmation
+// time rather than recomputed at payout time, so a later change to
+// REVENUE_SHARE_MODEL_PCT never silently rewrites what a model was already
+// owed. CREDIT_PACK rows leave both shares null: credits are a wallet-wide
+// balance with no per-model attribution until Session 08.
 // =============================================================================
 import { createId } from '@paralleldrive/cuid2';
 import {
   CHANNEL_CURRENCY,
+  DEFAULT_REVENUE_SHARE_MODEL_PCT,
   SUBSCRIPTION_PERIOD_DAYS,
   SUBSCRIPTION_PLANS,
   findCreditPack,
@@ -45,6 +54,7 @@ import {
 import type { PrismaClient } from '../../lib/prisma.js';
 import type { ContentService } from '../content/content.service.js';
 import type { PrismaTransactionClient, WalletService } from '../wallet/wallet.service.js';
+import { computeRevenueSplit } from '../payouts/revenue.js';
 import {
   PaymentProviderError,
   type CreateChargeParams,
@@ -83,6 +93,12 @@ export interface PaymentsServiceDeps {
   grantContentAccess: ContentService['grantContentAccess'];
   /** Injected so tests can supply a stub adapter without touching env. */
   getProvider: (channel: PaymentChannel) => IPaymentProvider;
+  /**
+   * Model's cut of a confirmed subscription, as a whole percent. Injected
+   * (from `REVENUE_SHARE_MODEL_PCT`) rather than read here, so this module
+   * stays env-free and a test can vary the split without touching process.env.
+   */
+  revenueShareModelPct?: number;
 }
 
 export interface SubscriptionCheckoutParams {
@@ -116,6 +132,7 @@ export function createPaymentsService({
   wallet,
   grantContentAccess,
   getProvider,
+  revenueShareModelPct = DEFAULT_REVENUE_SHARE_MODEL_PCT,
 }: PaymentsServiceDeps) {
   /** Load the paying subscriber; they must exist and be verified. */
   async function loadCustomer(userId: string) {
@@ -278,6 +295,7 @@ export function createPaymentsService({
       userId: string;
       modelId: string | null;
       tier: ContentTier | null;
+      amount: number;
       provider: 'WOOVI' | 'NOWPAYMENTS' | 'CCBILL_MOCK';
     },
     providerTransactionId: string,
@@ -287,6 +305,19 @@ export function createPaymentsService({
     }
     const tier = row.tier as SubscriptionTier;
     const currentPeriodEnd = periodEnd();
+
+    // Stamp the model/platform split on the transaction itself. This row is
+    // now the only input a payout run needs: `SUM(modelShareCents) WHERE
+    // payoutId IS NULL` is the model's payable balance, derived rather than
+    // tracked in a counter that could drift.
+    const split = computeRevenueSplit(row.amount, revenueShareModelPct);
+    await tx.paymentTransaction.update({
+      where: { id: row.id },
+      data: {
+        modelShareCents: split.modelShareCents,
+        platformShareCents: split.platformShareCents,
+      },
+    });
 
     const subscription = await tx.subscription.upsert({
       where: { subscriberId_modelId: { subscriberId: row.userId, modelId: row.modelId } },
@@ -343,6 +374,8 @@ export function createPaymentsService({
           grantedContentCount: unlockable.length,
           currentPeriodEnd: currentPeriodEnd.toISOString(),
           transactionId: row.id,
+          modelShareCents: split.modelShareCents,
+          platformShareCents: split.platformShareCents,
         },
       },
     });
