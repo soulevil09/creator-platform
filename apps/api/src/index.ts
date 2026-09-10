@@ -38,6 +38,8 @@ import {
   getPayoutProvider,
 } from './modules/payouts/provider.factory.js';
 import type { IPayoutProvider } from './modules/payouts/provider.interface.js';
+import { createSubscriptionsService } from './modules/subscriptions/subscriptions.service.js';
+import subscriptionRoutes from './modules/subscriptions/subscriptions.routes.js';
 
 /** Max reference-image upload size, shared by the multipart limit (10 MB). */
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
@@ -160,6 +162,21 @@ export async function buildServer(opts: BuildServerOptions = {}) {
     revenueShareModelPct: env.REVENUE_SHARE_MODEL_PCT,
   });
   await app.register(paymentRoutes, { prefix: '/api/payments', service: paymentsService });
+
+  // Subscription lifecycle (Session 06.5). It creates no charges of its own —
+  // it calls the payments module's single subscription-charge seam, so renewal
+  // and checkout remain one code path into IPaymentProvider.
+  const subscriptionsService = createSubscriptionsService({
+    prisma,
+    emailer,
+    issueSubscriptionCharge: paymentsService.issueSubscriptionCharge,
+    reminderDays: env.SUBSCRIPTION_RENEWAL_REMINDER_DAYS,
+    gracePeriodDays: env.SUBSCRIPTION_GRACE_PERIOD_DAYS,
+  });
+  await app.register(subscriptionRoutes, {
+    prefix: '/api/subscriptions',
+    service: subscriptionsService,
+  });
 
   const payoutsService = createPayoutsService({
     prisma,

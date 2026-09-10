@@ -132,6 +132,10 @@ export interface FakeSubscription {
   provider: FakeProviderEnum;
   providerSubscriptionId: string | null;
   currentPeriodEnd: Date;
+  /** Session 06.5 — "will this renew", kept apart from `status`. */
+  cancelAtPeriodEnd: boolean;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 export interface FakeAudit {
@@ -210,6 +214,36 @@ export function createFakePrisma() {
           if (op.not === null && value === null) return false;
           if (op.not !== null && value === op.not) return false;
         }
+        continue;
+      }
+      if (value !== condition) return false;
+    }
+    return true;
+  };
+
+  /**
+   * Match a subscription against the `where` shapes the renewal sweep uses:
+   * scalar equality, `{ in: [...] }` on id, and `lt`/`lte`/`gte`/`gt` date
+   * ranges on `currentPeriodEnd`. The range operators are what make each
+   * transition pass conditional — the same property the real index serves.
+   */
+  const subMatches = (sub: FakeSubscription, where: Where): boolean => {
+    for (const [key, condition] of Object.entries(where)) {
+      const value = (sub as unknown as Record<string, unknown>)[key];
+      if (condition !== null && typeof condition === 'object' && !(condition instanceof Date)) {
+        const op = condition as {
+          in?: unknown[];
+          lt?: Date;
+          lte?: Date;
+          gt?: Date;
+          gte?: Date;
+        };
+        if (Array.isArray(op.in) && !op.in.includes(value)) return false;
+        const when = value instanceof Date ? value.getTime() : NaN;
+        if (op.lt !== undefined && !(when < op.lt.getTime())) return false;
+        if (op.lte !== undefined && !(when <= op.lte.getTime())) return false;
+        if (op.gt !== undefined && !(when > op.gt.getTime())) return false;
+        if (op.gte !== undefined && !(when >= op.gte.getTime())) return false;
         continue;
       }
       if (value !== condition) return false;
@@ -447,6 +481,17 @@ export function createFakePrisma() {
       },
       findMany: async ({ where }: { where?: Where } = {}) =>
         transactions.filter((t) => (where ? txMatches(t, where) : true)),
+      /** Only the `orderBy: { createdAt: 'desc' }` shape the sweep uses. */
+      findFirst: async ({
+        where,
+        orderBy,
+      }: { where?: Where; orderBy?: { createdAt?: 'asc' | 'desc' } } = {}) => {
+        const matched = transactions.filter((t) => (where ? txMatches(t, where) : true));
+        if (orderBy?.createdAt === 'desc') {
+          matched.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+        }
+        return matched[0] ?? null;
+      },
       count: async ({ where }: { where?: Where } = {}) =>
         transactions.filter((t) => (where ? txMatches(t, where) : true)).length,
       /** Only the `_sum: { modelShareCents }` shape the balance query uses. */
@@ -555,9 +600,46 @@ export function createFakePrisma() {
           Object.assign(existing, update);
           return existing;
         }
-        const row = { ...create, id: nextId('sub') } as FakeSubscription;
+        const now = new Date();
+        const row = {
+          cancelAtPeriodEnd: false,
+          createdAt: now,
+          updatedAt: now,
+          ...create,
+          id: nextId('sub'),
+        } as FakeSubscription;
         subscriptions.push(row);
         return row;
+      },
+      findMany: async ({
+        where,
+        orderBy,
+      }: { where?: Where; orderBy?: { currentPeriodEnd?: 'asc' | 'desc' } } = {}) => {
+        const matched = subscriptions.filter((sub) => (where ? subMatches(sub, where) : true));
+        if (orderBy?.currentPeriodEnd === 'desc') {
+          matched.sort((a, b) => b.currentPeriodEnd.getTime() - a.currentPeriodEnd.getTime());
+        }
+        return matched;
+      },
+      update: async ({
+        where,
+        data,
+      }: {
+        where: { id: string };
+        data: Partial<FakeSubscription>;
+      }) => {
+        const row = subscriptions.find((sub) => sub.id === where.id);
+        if (!row) throw new Error('record not found');
+        Object.assign(row, data, { updatedAt: new Date() });
+        return row;
+      },
+      updateMany: async ({ where, data }: { where: Where; data: Record<string, unknown> }) => {
+        // Conditional by construction: the sweep's `where` carries the status
+        // being moved *from*, so a re-run matches zero rows here exactly as it
+        // would in Postgres.
+        const matched = subscriptions.filter((sub) => subMatches(sub, where));
+        for (const row of matched) Object.assign(row, data, { updatedAt: new Date() });
+        return { count: matched.length };
       },
     },
 
@@ -602,7 +684,10 @@ export function createFakePrisma() {
 export type FakePrisma = ReturnType<typeof createFakePrisma>;
 
 export function createFakeEmailer(): Emailer {
-  return { sendVerificationEmail: vi.fn(async () => {}) };
+  return {
+    sendVerificationEmail: vi.fn(async () => {}),
+    sendRenewalReminderEmail: vi.fn(async () => {}),
+  };
 }
 
 /** Seed a ModelProfile so a model can be subscribed to (and, optionally, paid). */
@@ -686,6 +771,31 @@ export function seedEarning(
     ...overrides,
   };
   prisma.__transactions.push(row);
+  return row;
+}
+
+/**
+ * Seed a Subscription directly — what a confirmed payment leaves behind, which
+ * is the only input the renewal sweep reads.
+ */
+export function seedSubscription(
+  prisma: FakePrisma,
+  overrides: Partial<FakeSubscription> & { subscriberId: string; modelId: string },
+): FakeSubscription {
+  const now = new Date();
+  const row: FakeSubscription = {
+    id: `sub_seed_${prisma.__subscriptions.length + 1}`,
+    tier: 'STANDARD',
+    status: 'ACTIVE',
+    provider: 'WOOVI',
+    providerSubscriptionId: null,
+    currentPeriodEnd: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000),
+    cancelAtPeriodEnd: false,
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  };
+  prisma.__subscriptions.push(row);
   return row;
 }
 

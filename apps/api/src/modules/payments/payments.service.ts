@@ -108,6 +108,16 @@ export interface SubscriptionCheckoutParams {
   provider: CheckoutChannel;
 }
 
+/**
+ * What `issueSubscriptionCharge` returns: the checkout body the HTTP endpoint
+ * answers with, plus the model's display name for callers (the renewal sweep)
+ * that need to address a message about it.
+ */
+export interface SubscriptionChargeResult {
+  checkout: CheckoutResponse;
+  modelDisplayName: string;
+}
+
 export interface CreditsCheckoutParams {
   userId: string;
   packId: string;
@@ -327,6 +337,12 @@ export function createPaymentsService({
         provider: row.provider,
         providerSubscriptionId: providerTransactionId,
         currentPeriodEnd,
+        // Paying for another period is an unambiguous statement of intent to
+        // continue, so it clears a standing opt-out (Session 06.5). Without
+        // this, a subscriber who cancelled and then deliberately re-subscribed
+        // would silently be cancelled again at the end of the period they just
+        // paid for.
+        cancelAtPeriodEnd: false,
       },
       create: {
         subscriberId: row.userId,
@@ -381,42 +397,66 @@ export function createPaymentsService({
     });
   }
 
+  /**
+   * Raise one subscription charge for a (subscriber, model, tier) triple.
+   *
+   * This is the single `IPaymentProvider` call site for subscription revenue:
+   * both the public checkout endpoint and Session 06.5's renewal sweep go
+   * through it. A renewal is not a different kind of payment — PIX and crypto
+   * are one-shot instruments with no stored mandate to pull from, so renewing
+   * *is* issuing a fresh charge. Duplicating this for the sweep would have
+   * meant two places to keep the catalog price, the eligibility checks and the
+   * idempotency key in step.
+   */
+  async function issueSubscriptionCharge(
+    params: SubscriptionCheckoutParams,
+  ): Promise<SubscriptionChargeResult> {
+    const model = await prisma.user.findUnique({ where: { id: params.modelId } });
+    if (!model || model.role !== 'MODEL') {
+      throw new PaymentError(404, 'Model not found');
+    }
+    if (model.id === params.userId) {
+      throw new PaymentError(400, 'You cannot subscribe to yourself');
+    }
+    const profile = await prisma.modelProfile.findUnique({ where: { userId: model.id } });
+    if (!profile) {
+      throw new PaymentError(409, 'This model is not accepting subscriptions yet');
+    }
+
+    const currency = CHANNEL_CURRENCY[params.provider];
+    const amountCents = SUBSCRIPTION_PLANS[params.tier].price[currency];
+
+    const checkout = await createCharge({
+      userId: params.userId,
+      channel: params.provider,
+      kind: 'subscription',
+      amountCents,
+      currency,
+      description: `${SUBSCRIPTION_PLANS[params.tier].label} subscription — ${model.displayName}`,
+      creditsGranted: null,
+      modelId: model.id,
+      tier: params.tier,
+      subscription: {
+        modelId: model.id,
+        tier: params.tier,
+        intervalDays: SUBSCRIPTION_PERIOD_DAYS,
+      },
+    });
+
+    // The model's display name is already loaded here; handing it back saves
+    // the renewal sweep a second lookup just to address its reminder email.
+    return { checkout, modelDisplayName: model.displayName };
+  }
+
   return {
+    issueSubscriptionCharge,
+
     /** POST /checkout/subscription. Price comes from the catalog, never the client. */
     async createSubscriptionCheckout(
       params: SubscriptionCheckoutParams,
     ): Promise<CheckoutResponse> {
-      const model = await prisma.user.findUnique({ where: { id: params.modelId } });
-      if (!model || model.role !== 'MODEL') {
-        throw new PaymentError(404, 'Model not found');
-      }
-      if (model.id === params.userId) {
-        throw new PaymentError(400, 'You cannot subscribe to yourself');
-      }
-      const profile = await prisma.modelProfile.findUnique({ where: { userId: model.id } });
-      if (!profile) {
-        throw new PaymentError(409, 'This model is not accepting subscriptions yet');
-      }
-
-      const currency = CHANNEL_CURRENCY[params.provider];
-      const amountCents = SUBSCRIPTION_PLANS[params.tier].price[currency];
-
-      return createCharge({
-        userId: params.userId,
-        channel: params.provider,
-        kind: 'subscription',
-        amountCents,
-        currency,
-        description: `${SUBSCRIPTION_PLANS[params.tier].label} subscription — ${model.displayName}`,
-        creditsGranted: null,
-        modelId: model.id,
-        tier: params.tier,
-        subscription: {
-          modelId: model.id,
-          tier: params.tier,
-          intervalDays: SUBSCRIPTION_PERIOD_DAYS,
-        },
-      });
+      const { checkout } = await issueSubscriptionCharge(params);
+      return checkout;
     },
 
     /** POST /checkout/credits. */

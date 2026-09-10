@@ -224,7 +224,10 @@ function createFakePrisma() {
 type FakePrisma = ReturnType<typeof createFakePrisma>;
 
 function createFakeEmailer(): Emailer {
-  return { sendVerificationEmail: vi.fn(async () => {}) };
+  return {
+    sendVerificationEmail: vi.fn(async () => {}),
+    sendRenewalReminderEmail: vi.fn(async () => {}),
+  };
 }
 
 function createFakeStorage() {

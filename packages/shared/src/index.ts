@@ -180,6 +180,19 @@ export const CHANNEL_CURRENCY: Record<CheckoutChannel, Extract<Currency, 'BRL' |
   crypto: 'USD',
 };
 
+/**
+ * The reverse of `CHANNEL_CURRENCY`, derived from it rather than written out a
+ * second time — a hand-maintained inverse is a table that can drift from the
+ * one it mirrors. Used by the renewal sweep to reissue a charge on the same
+ * rail the subscriber originally paid on: what a row records is the currency it
+ * was billed in, not the channel (`provider` names an adapter, and a `mock`
+ * adapter serving PIX reports `CCBILL_MOCK`, so it cannot answer this).
+ * Returns undefined for a currency no channel bills in.
+ */
+export function channelForCurrency(currency: string): CheckoutChannel | undefined {
+  return CHECKOUT_CHANNELS.find((channel) => CHANNEL_CURRENCY[channel] === currency);
+}
+
 // ─── Checkout responses ──────────────────────────────────────────────────────
 /** PIX presentation payload: a QR image plus the "copia e cola" BR code. */
 export type PixChargePayload = {
@@ -228,6 +241,55 @@ export type CheckoutResponse = {
 export type WalletBalanceResponse = {
   userId: string;
   balance: number;
+};
+
+// ─── Subscription lifecycle (Session 06.5) ───────────────────────────────────
+/**
+ * How many days before `currentPeriodEnd` the renewal charge is issued and the
+ * reminder email sent. PIX and crypto are both one-shot instruments — there is
+ * no stored mandate to pull from — so renewal is a fresh charge the subscriber
+ * chooses to pay, and they need a few days' notice to do it.
+ */
+export const DEFAULT_SUBSCRIPTION_RENEWAL_REMINDER_DAYS = 3;
+
+/**
+ * How long after `currentPeriodEnd` a non-payer stays PAST_DUE before being
+ * marked EXPIRED. Their access has already lapsed on its own by then
+ * (`ContentAccess.expiresAt` is checked live at serve time); the grace window
+ * is about how long the renewal charge they were sent stays worth paying.
+ */
+export const DEFAULT_SUBSCRIPTION_GRACE_PERIOD_DAYS = 3;
+
+/** One row of GET /api/subscriptions/me — the caller's own subscriptions. */
+export type SubscriptionListItem = {
+  subscriptionId: string;
+  modelId: string;
+  tier: SubscriptionTier;
+  status: SubscriptionStatus;
+  currentPeriodEnd: string;
+  /**
+   * True once the subscriber has opted out of renewal. They keep access until
+   * `currentPeriodEnd`; no renewal charge is issued; then the row goes
+   * CANCELED rather than PAST_DUE.
+   */
+  cancelAtPeriodEnd: boolean;
+};
+
+/** GET /api/subscriptions/me. */
+export type MySubscriptionsResponse = {
+  subscriptions: SubscriptionListItem[];
+};
+
+/**
+ * POST /api/subscriptions/renewals/run — aggregate only, for the same reason
+ * the payout run's summary is: the caller is a cron job holding a shared
+ * secret, so the response must not double as a subscriber-history oracle.
+ */
+export type SubscriptionRenewalRunSummary = {
+  remindersIssued: number;
+  movedToPastDue: number;
+  movedToExpired: number;
+  movedToCanceled: number;
 };
 
 // ─── App metadata ────────────────────────────────────────────────────────────

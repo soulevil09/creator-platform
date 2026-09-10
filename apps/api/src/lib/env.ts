@@ -10,6 +10,8 @@
 import {
   DEFAULT_PAYOUT_MIN_THRESHOLD_CENTS,
   DEFAULT_REVENUE_SHARE_MODEL_PCT,
+  DEFAULT_SUBSCRIPTION_GRACE_PERIOD_DAYS,
+  DEFAULT_SUBSCRIPTION_RENEWAL_REMINDER_DAYS,
   type Currency,
 } from '@creator-platform/shared';
 
@@ -140,6 +142,35 @@ export const env = {
    * needs the multi-currency work flagged in CLAUDE.md's Open Items first.
    */
   PAYOUT_CURRENCY: (process.env.PAYOUT_CURRENCY ?? 'BRL') as Currency,
+
+  // ─── Subscription lifecycle (Session 06.5) ────────────────────────────────
+  /**
+   * Shared secret for POST /api/subscriptions/renewals/run, called by the daily
+   * GitHub Actions cron job rather than a logged-in user — same reasoning as
+   * PAYOUT_CRON_SECRET, and the same bar: required in production so an empty
+   * value can never become an open endpoint, compared in constant time, and
+   * never echoed into a response, log line, or error message.
+   */
+  SUBSCRIPTION_RENEWAL_CRON_SECRET: requiredInProduction(
+    'SUBSCRIPTION_RENEWAL_CRON_SECRET',
+    NODE_ENV,
+  ),
+
+  /** Days before `currentPeriodEnd` that the renewal charge + reminder go out. */
+  SUBSCRIPTION_RENEWAL_REMINDER_DAYS: integerInRange(
+    'SUBSCRIPTION_RENEWAL_REMINDER_DAYS',
+    DEFAULT_SUBSCRIPTION_RENEWAL_REMINDER_DAYS,
+    1,
+    28,
+  ),
+
+  /** Days a non-payer stays PAST_DUE after `currentPeriodEnd` before EXPIRED. */
+  SUBSCRIPTION_GRACE_PERIOD_DAYS: integerInRange(
+    'SUBSCRIPTION_GRACE_PERIOD_DAYS',
+    DEFAULT_SUBSCRIPTION_GRACE_PERIOD_DAYS,
+    0,
+    28,
+  ),
 
   // Tunables with safe defaults.
   JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN ?? '15m',

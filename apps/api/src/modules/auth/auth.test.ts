@@ -71,6 +71,7 @@ function createFakeEmailer() {
     sendVerificationEmail: vi.fn(async (to: string, token: string) => {
       sent.push({ to, token });
     }),
+    sendRenewalReminderEmail: vi.fn(async () => {}),
   };
   return { emailer, sent };
 }

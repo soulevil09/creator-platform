@@ -40,3 +40,8 @@ process.env.PAXUM_API_KEY ??= 'test-paxum-api-key';
 process.env.PAXUM_IPN_SECRET ??= 'test-paxum-ipn-secret';
 process.env.PAXUM_API_URL ??= 'https://paxum.test';
 process.env.PAYOUT_CRON_SECRET ??= 'test-payout-cron-secret';
+
+// Subscription-lifecycle cron secret (Session 06.5). Same posture as the payout
+// cron secret: a deterministic test value that the suite compares against, never
+// echoed into a response.
+process.env.SUBSCRIPTION_RENEWAL_CRON_SECRET ??= 'test-renewal-cron-secret';

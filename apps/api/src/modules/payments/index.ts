@@ -1,5 +1,10 @@
 // Public surface of the payments module.
-export { createPaymentsService, PaymentError, type PaymentsService } from './payments.service.js';
+export {
+  createPaymentsService,
+  PaymentError,
+  type PaymentsService,
+  type SubscriptionChargeResult,
+} from './payments.service.js';
 export {
   getPaymentProvider,
   assertPaymentProvidersConfigured,

@@ -1,0 +1,55 @@
+# Daily subscription-renewal sweep.
+#
+# Same shape and same reasoning as weekly-payout.yml: the lifecycle logic
+# (issue renewal charge → grace period → expire / cancel) lives in the API
+# behind one service, so this workflow's whole job is to say "now". A second
+# code path into the same subscriptions would be a second place to get the
+# idempotency wrong.
+#
+# Auth is the shared secret `SUBSCRIPTION_RENEWAL_CRON_SECRET`, compared in
+# constant time by the endpoint. A cron job has no user session, so it has no
+# JWT to present. Both secrets live in GitHub Actions repository secrets and are
+# never echoed: `curl` reads the header value from the environment, so it never
+# appears in the run log.
+name: Subscription renewals
+
+on:
+  schedule:
+    # Daily at 06:00 UTC (03:00 BRT) — a quiet hour, and early enough that a
+    # subscriber whose period ends today has the whole day to pay. Cron in
+    # GitHub Actions is best-effort; a late run is harmless because the sweep
+    # is idempotent by query, not by when it happens.
+    - cron: '0 6 * * *'
+  # Manual trigger for a missed day.
+  workflow_dispatch:
+
+# Never let two runs overlap. Each pass is idempotent on its own, but there is
+# no reason to make the database arbitrate.
+concurrency:
+  group: subscription-renewals
+  cancel-in-progress: false
+
+jobs:
+  renewals:
+    name: Trigger renewal sweep
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /api/subscriptions/renewals/run
+        env:
+          API_PUBLIC_URL: ${{ secrets.API_PUBLIC_URL }}
+          SUBSCRIPTION_RENEWAL_CRON_SECRET: ${{ secrets.SUBSCRIPTION_RENEWAL_CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "${API_PUBLIC_URL}" ] || [ -z "${SUBSCRIPTION_RENEWAL_CRON_SECRET}" ]; then
+            echo "::error::API_PUBLIC_URL and SUBSCRIPTION_RENEWAL_CRON_SECRET must be set as repository secrets."
+            exit 1
+          fi
+          # --fail-with-body so a non-2xx exits non-zero (the run turns red)
+          # while still printing what the API said. The summary body carries
+          # only aggregate counts — no subscriber ids, no amounts.
+          curl --silent --show-error --fail-with-body \
+            --max-time 300 \
+            -X POST "${API_PUBLIC_URL}/api/subscriptions/renewals/run" \
+            -H "X-Renewal-Cron-Secret: ${SUBSCRIPTION_RENEWAL_CRON_SECRET}" \
+            -H 'Content-Type: application/json' \
+            | tee "$GITHUB_STEP_SUMMARY"

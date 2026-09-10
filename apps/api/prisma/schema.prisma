@@ -23,6 +23,10 @@
 // weekly Paxum transfer. A model's payable balance is never a stored counter —
 // it is derived as SUM(modelShareCents) WHERE payoutId IS NULL, so the ledger
 // is the single source of truth and cannot drift from a cached total.
+// Session 06.5 adds the subscription lifecycle: `Subscription.cancelAtPeriodEnd`
+// separates "will this renew" from `status` ("what access is live right now"),
+// so a daily sweep can issue renewal charges, open a grace period for
+// non-payers, and land opted-out subscribers on CANCELED rather than EXPIRED.
 // =============================================================================
 
 generator client {
@@ -248,12 +252,25 @@ model Subscription {
   providerSubscriptionId String? // provider-side recurrence handle (null until the provider registers one)
   currentPeriodEnd       DateTime
 
+  // ─── Lifecycle (Session 06.5) ─────────────────────────────────────────────
+  // "Will this renew", kept separate from `status` ("what access do they have
+  // right now") rather than added as a fifth status value. A subscriber who
+  // cancels keeps exactly what they paid for: they stay ACTIVE with
+  // `cancelAtPeriodEnd: true`, the renewal sweep issues them no charge, and at
+  // `currentPeriodEnd` they go straight to CANCELED — never PAST_DUE, since
+  // there is nothing to retry for someone who opted out. A lapsed non-payer
+  // (`cancelAtPeriodEnd: false`) walks ACTIVE → PAST_DUE → EXPIRED instead, so
+  // churn and payment failure stay distinguishable in reporting.
+  cancelAtPeriodEnd Boolean @default(false)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@unique([subscriberId, modelId])
   @@index([modelId])
   @@index([status])
+  // The renewal sweep's four passes all filter on exactly these three columns.
+  @@index([status, cancelAtPeriodEnd, currentPeriodEnd])
 }
 
 // ─── CreditWallet ────────────────────────────────────────────────────────────
