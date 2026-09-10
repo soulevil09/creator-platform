@@ -23,6 +23,7 @@
     "@fastify/jwt": "^10.1.0",
     "@fastify/multipart": "^10.0.0",
     "@fastify/rate-limit": "^11.0.0",
+    "@fastify/websocket": "^11.3.0",
     "@paralleldrive/cuid2": "^3.3.0",
     "@prisma/client": "^5.18.0",
     "bcryptjs": "^3.0.3",
@@ -35,10 +36,12 @@
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
+    "@types/ws": "^8.18.1",
     "nock": "^14.0.17",
     "prisma": "^5.18.0",
     "tsx": "^4.16.0",
     "typescript": "^5.5.0",
-    "vitest": "^2.0.0"
+    "vitest": "^2.0.0",
+    "ws": "^8.21.3"
   }
 }

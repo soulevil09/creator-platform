@@ -292,6 +292,132 @@ export type SubscriptionRenewalRunSummary = {
   movedToCanceled: number;
 };
 
+// ─── Messaging (Session 07) ──────────────────────────────────────────────────
+/**
+ * Media kinds a chat message may carry. Mirrors the Prisma
+ * `MessageAttachmentType` enum, and deliberately not `CONTENT_TYPES`: chat
+ * attachments and the monetized content library are different products with
+ * different size caps, so widening one must not silently widen the other.
+ */
+export const MESSAGE_ATTACHMENT_TYPES = ['IMAGE', 'VIDEO'] as const;
+export type MessageAttachmentType = (typeof MESSAGE_ATTACHMENT_TYPES)[number];
+
+/** Max characters in a message body — enforced server-side by Zod. */
+export const MESSAGE_BODY_MAX_LENGTH = 4000;
+
+/** Default / maximum page size for the cursor-paginated history read. */
+export const MESSAGE_PAGE_SIZE_DEFAULT = 50;
+export const MESSAGE_PAGE_SIZE_MAX = 100;
+
+/** Characters of the last message shown as a conversation-list preview. */
+export const MESSAGE_PREVIEW_MAX_LENGTH = 120;
+
+/**
+ * One message as surfaced by the API and pushed over the socket.
+ *
+ * There is no attachment URL and no storage key here by design: the key never
+ * leaves the server (same rule as `Content.storageKey`), and a URL embedded in
+ * history would outlive the 60-second TTL it was minted with. A client that
+ * wants the bytes calls GET /api/messages/attachments/:messageId with the
+ * `messageId` below and gets a fresh signed URL.
+ */
+export type MessageItem = {
+  messageId: string;
+  conversationId: string;
+  senderId: string;
+  /** Null when the message is attachment-only. */
+  body: string | null;
+  attachmentType: MessageAttachmentType | null;
+  attachmentMimeType: string | null;
+  attachmentSizeBytes: number | null;
+  /** Null while the other participant has not opened the conversation. */
+  readAt: string | null;
+  createdAt: string;
+};
+
+/** POST /api/messages/conversations/:modelId — 201 created, 200 existing. */
+export type ConversationSummary = {
+  conversationId: string;
+  subscriberId: string;
+  modelId: string;
+  lastMessageAt: string | null;
+  createdAt: string;
+};
+
+/** One row of GET /api/messages/conversations. */
+export type ConversationListItem = {
+  conversationId: string;
+  /** The participant who is not the caller. */
+  otherParticipantId: string;
+  otherParticipantDisplayName: string;
+  /**
+   * The newest message, truncated — or `"[image]"` / `"[video]"` when that
+   * message carried only an attachment. Null for a conversation with no
+   * messages yet.
+   */
+  lastMessagePreview: string | null;
+  lastMessageAt: string | null;
+  /** Unread messages sent by the *other* participant. */
+  unreadCount: number;
+};
+
+/** GET /api/messages/conversations. */
+export type ConversationListResponse = {
+  conversations: ConversationListItem[];
+};
+
+/**
+ * GET /api/messages/conversations/:conversationId/messages — newest first.
+ * `nextCursor` is the id to pass back as `?before=`, or null at the end of the
+ * history. Cursor-based, never offset-based: offsets shift under inserts, and
+ * a chat is append-heavy by definition.
+ */
+export type MessageHistoryResponse = {
+  messages: MessageItem[];
+  nextCursor: string | null;
+};
+
+/**
+ * POST /api/messages/conversations/:conversationId/messages, JSON form. An
+ * attachment is sent as multipart instead, with the same optional `text` as a
+ * form field.
+ */
+export type SendMessageRequest = {
+  text?: string;
+};
+
+/** 201 body of a successful send. */
+export type SendMessageResponse = MessageItem;
+
+/** GET /api/messages/attachments/:messageId — short-lived, never the key. */
+export type MessageAttachmentUrlResponse = {
+  signedUrl: string;
+  expiresIn: number;
+};
+
+/** PATCH /api/messages/conversations/:conversationId/read. */
+export type MarkConversationReadResponse = {
+  conversationId: string;
+  /** How many messages this call actually flipped to read (0 on a re-run). */
+  markedRead: number;
+};
+
+/**
+ * The only event the socket carries. The WebSocket is broadcast-only — every
+ * message is written through the REST send endpoint, so there is exactly one
+ * audited, rate-limited write path and the socket stays a pure read-side
+ * concern (the same "one call site" discipline as `issueSubscriptionCharge`).
+ */
+export const MESSAGE_EVENT_NEW = 'message.new';
+
+export type MessageNewEvent = {
+  type: typeof MESSAGE_EVENT_NEW;
+  message: MessageItem;
+};
+
+/** Every event pushed over /ws/messages. A union of one, for now. */
+export type MessagingSocketEvent = MessageNewEvent;
+
 // ─── App metadata ────────────────────────────────────────────────────────────
 export const APP_NAME = 'Creator Platform';
 

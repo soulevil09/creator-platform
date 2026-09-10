@@ -5,6 +5,7 @@ import cookie from '@fastify/cookie';
 import jwt from '@fastify/jwt';
 import rateLimit from '@fastify/rate-limit';
 import multipart from '@fastify/multipart';
+import websocket from '@fastify/websocket';
 import {
   APP_NAME,
   SUPPORTED_CURRENCIES,
@@ -40,6 +41,10 @@ import {
 import type { IPayoutProvider } from './modules/payouts/provider.interface.js';
 import { createSubscriptionsService } from './modules/subscriptions/subscriptions.service.js';
 import subscriptionRoutes from './modules/subscriptions/subscriptions.routes.js';
+import { createMessagingService } from './modules/messaging/messaging.service.js';
+import messagingRoutes from './modules/messaging/messaging.routes.js';
+import messagingWsRoutes from './modules/messaging/messaging.ws.js';
+import { createConnectionRegistry } from './modules/messaging/connections.js';
 
 /** Max reference-image upload size, shared by the multipart limit (10 MB). */
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
@@ -80,7 +85,22 @@ export async function buildServer(opts: BuildServerOptions = {}) {
     assertPayoutProviderConfigured();
   }
 
-  const app = Fastify({ logger: env.NODE_ENV !== 'test' });
+  // Message bodies must never reach a log line in plaintext (Session 07): this
+  // is an adult-content platform, so a private message in an access log is a
+  // disclosure, not a debugging convenience. Fastify logs no request body by
+  // default; `redact` makes that explicit and survives anyone later adding a
+  // body-logging serializer or logging a request object directly.
+  const app = Fastify({
+    logger:
+      env.NODE_ENV !== 'test'
+        ? {
+            redact: {
+              paths: ['req.body.text', 'body.text', 'message.body', 'msg.body'],
+              remove: true,
+            },
+          }
+        : false,
+  });
 
   // CORS: browser requests only from the configured app origin, with cookies.
   await app.register(cors, { origin: env.APP_URL, credentials: true });
@@ -177,6 +197,28 @@ export async function buildServer(opts: BuildServerOptions = {}) {
     prefix: '/api/subscriptions',
     service: subscriptionsService,
   });
+
+  // ── Messaging (Session 07) ────────────────────────────────────────────────
+  // The connection registry is process-local: fan-out reaches only recipients
+  // connected to THIS instance, which is correct for the single-instance MVP
+  // deployment and needs a shared pub/sub layer before the API is scaled
+  // horizontally (Open Item, Session 12/13). The service depends on the
+  // `send` seam alone, so that swap does not reach into the module.
+  const connections = createConnectionRegistry();
+  const messagingService = createMessagingService({
+    prisma,
+    storage,
+    bucket: env.STORAGE_BUCKET,
+    connections,
+  });
+  await app.register(messagingRoutes, {
+    prefix: '/api/messages',
+    service: messagingService,
+  });
+  // Registered at the root, not under /api: the socket is a transport, not a
+  // REST resource, and the upgrade path is what a client dials directly.
+  await app.register(websocket);
+  await app.register(messagingWsRoutes, { connections });
 
   const payoutsService = createPayoutsService({
     prisma,

@@ -27,6 +27,11 @@
 // separates "will this renew" from `status` ("what access is live right now"),
 // so a daily sweep can issue renewal charges, open a grace period for
 // non-payers, and land opted-out subscribers on CANCELED rather than EXPIRED.
+// Session 07 adds private messaging: Conversation (one per subscriber/model
+// pair, mirroring Subscription's own pair uniqueness) and Message (text and/or
+// a single image/video attachment). Attachment object keys are persisted but
+// NEVER serialized — the same rule Content.storageKey and
+// ReferenceImage.storageKey already follow.
 // =============================================================================
 
 generator client {
@@ -76,7 +81,13 @@ model User {
   auditLogs           AuditLog[]
 
   // Payouts (Session 06) — money out, to a MODEL's Paxum wallet.
-  payouts   Payout[] @relation("ModelPayouts")
+  payouts Payout[] @relation("ModelPayouts")
+
+  // Messaging (Session 07) — 1:1 conversations, from both sides of the pair.
+  subscriberConversations Conversation[] @relation("SubscriberConversations")
+  modelConversations      Conversation[] @relation("ModelConversations")
+  sentMessages            Message[]      @relation("SentMessages")
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -427,4 +438,93 @@ model AuditLog {
   @@index([entity, entityId])
   @@index([actorId])
   @@index([createdAt])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Messaging domain (Session 07)
+//
+// 1:1 private chat between one subscriber and one model. Group chats are out
+// of product scope, which is why `Conversation` names its two participants as
+// columns rather than carrying a participants join table: the pair IS the
+// conversation, and `@@unique([subscriberId, modelId])` makes that a database
+// guarantee rather than an application convention — the same shape
+// `Subscription` already uses for the same pair.
+//
+// Who may write is deliberately NOT stored here. A subscriber's right to send
+// is `Subscription.status === 'ACTIVE'`, read live on every send: caching it
+// onto the conversation at creation time would keep a lapsed subscriber
+// writing forever. History, by contrast, is never retroactively hidden —
+// messages already paid for stay readable to both parties whatever the
+// subscription does afterwards.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Media kinds a message may carry. Deliberately its own enum rather than a
+/// reuse of `ContentType`: chat attachments and the monetized content library
+/// are different products with different caps, and widening one enum later
+/// must not silently widen the other.
+enum MessageAttachmentType {
+  IMAGE
+  VIDEO
+}
+
+// ─── Conversation ────────────────────────────────────────────────────────────
+// `lastMessageAt` is denormalized from the newest Message purely so the
+// conversation list can be ordered and paged without touching the messages
+// table — it is written in the same transaction as the message that sets it.
+// Null until the first message is sent (a conversation can exist empty, since
+// creating one and writing to it are separate calls).
+model Conversation {
+  id           String @id @default(cuid())
+  subscriberId String
+  subscriber   User   @relation("SubscriberConversations", fields: [subscriberId], references: [id], onDelete: Cascade)
+  modelId      String
+  model        User   @relation("ModelConversations", fields: [modelId], references: [id], onDelete: Cascade)
+
+  lastMessageAt DateTime?
+
+  messages Message[]
+
+  createdAt DateTime @default(now())
+
+  @@unique([subscriberId, modelId])
+  // Both sides read their own inbox ordered by recency; each participant gets
+  // the index that makes that one query, not a scan.
+  @@index([modelId, lastMessageAt])
+  @@index([subscriberId, lastMessageAt])
+}
+
+// ─── Message ─────────────────────────────────────────────────────────────────
+// Text, one attachment, or both — never neither. "Never neither" is a CHECK
+// constraint written by hand in the migration (Prisma has no CHECK primitive),
+// for the same reason the payments domain puts its invariants there: an
+// application-level guard is one code path away from being bypassed.
+//
+// `attachmentStorageKey` is persisted but NEVER serialized to a client. The
+// only way to reach the bytes is GET /api/messages/attachments/:messageId,
+// which checks participation and mints a 60-second signed URL — identical
+// discipline to `Content.storageKey`.
+model Message {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderId       String
+  sender         User         @relation("SentMessages", fields: [senderId], references: [id], onDelete: Cascade)
+
+  /// Null when the message is attachment-only.
+  body String?
+
+  attachmentType       MessageAttachmentType?
+  attachmentStorageKey String? // S3 key, never exposed externally
+  attachmentMimeType   String?
+  attachmentSizeBytes  Int?
+
+  /// Set when the *other* participant opens the conversation. Null = unread.
+  readAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  // Serves both the cursor-paginated history read (conversationId + createdAt
+  // DESC) and the unread-count groupBy, which filters the same leading column.
+  @@index([conversationId, createdAt])
+  @@index([senderId])
 }

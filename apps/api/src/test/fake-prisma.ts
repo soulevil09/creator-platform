@@ -148,6 +148,28 @@ export interface FakeAudit {
   createdAt: Date;
 }
 
+export interface FakeConversation {
+  id: string;
+  subscriberId: string;
+  modelId: string;
+  lastMessageAt: Date | null;
+  createdAt: Date;
+}
+
+export interface FakeMessage {
+  id: string;
+  conversationId: string;
+  senderId: string;
+  body: string | null;
+  attachmentType: 'IMAGE' | 'VIDEO' | null;
+  /** Persisted, never serialized — the suite asserts it never leaves. */
+  attachmentStorageKey: string | null;
+  attachmentMimeType: string | null;
+  attachmentSizeBytes: number | null;
+  readAt: Date | null;
+  createdAt: Date;
+}
+
 type Where = Record<string, unknown>;
 
 /** Mimics Prisma's unique-constraint rejection (Postgres 23505 → P2002). */
@@ -191,6 +213,17 @@ export function createFakePrisma() {
   const subscriptions: FakeSubscription[] = [];
   const payouts: FakePayout[] = [];
   const auditLogs: FakeAudit[] = [];
+  const conversations: FakeConversation[] = [];
+  const messages: FakeMessage[] = [];
+  /**
+   * Per-delegate-method call counter. The conversation list must stay O(1) in
+   * queries however many conversations a user has, and the only honest way to
+   * assert that is to count the calls the service actually issues.
+   */
+  const calls: Record<string, number> = {};
+  const track = (name: string) => {
+    calls[name] = (calls[name] ?? 0) + 1;
+  };
   let seq = 0;
   const nextId = (prefix: string) => `${prefix}_${++seq}`;
 
@@ -257,6 +290,25 @@ export function createFakePrisma() {
       if (condition !== null && typeof condition === 'object' && !(condition instanceof Date)) {
         const op = condition as { in?: unknown[] };
         if (Array.isArray(op.in) && !op.in.includes(value)) return false;
+        continue;
+      }
+      if (value !== condition) return false;
+    }
+    return true;
+  };
+
+  /**
+   * Match a message against the `where` shapes the messaging module issues:
+   * scalar equality, `{ in: [...] }` on conversationId, and `{ not: ... }` /
+   * explicit `null` on senderId and readAt.
+   */
+  const messageMatches = (m: FakeMessage, where: Where): boolean => {
+    for (const [key, condition] of Object.entries(where)) {
+      const value = (m as unknown as Record<string, unknown>)[key];
+      if (condition !== null && typeof condition === 'object' && !(condition instanceof Date)) {
+        const op = condition as { in?: unknown[]; not?: unknown };
+        if (Array.isArray(op.in) && !op.in.includes(value)) return false;
+        if ('not' in op && value === op.not) return false;
         continue;
       }
       if (value !== condition) return false;
@@ -663,6 +715,211 @@ export function createFakePrisma() {
         }),
     },
 
+
+    // ── Messaging (Session 07) ───────────────────────────────────────────────
+    conversation: {
+      findUnique: async ({ where }: { where: Where }) => {
+        track('conversation.findUnique');
+        const pair = where.subscriberId_modelId as
+          | { subscriberId: string; modelId: string }
+          | undefined;
+        if (pair) {
+          return (
+            conversations.find(
+              (c) => c.subscriberId === pair.subscriberId && c.modelId === pair.modelId,
+            ) ?? null
+          );
+        }
+        return conversations.find((c) => c.id === where.id) ?? null;
+      },
+      /**
+       * Only the conversation-list shape: `OR` on the two participant columns,
+       * `lastMessageAt desc nulls last`, and both participants joined in.
+       */
+      findMany: async ({
+        where,
+        orderBy,
+        include,
+      }: {
+        where: Where;
+        orderBy?: { lastMessageAt?: { sort: 'asc' | 'desc'; nulls?: 'first' | 'last' } };
+        include?: Record<string, unknown>;
+      }) => {
+        track('conversation.findMany');
+        const or = (where.OR ?? []) as Where[];
+        let rows = conversations.filter((c) =>
+          or.length === 0
+            ? true
+            : or.some((clause) =>
+                Object.entries(clause).every(
+                  ([key, value]) => (c as unknown as Record<string, unknown>)[key] === value,
+                ),
+              ),
+        );
+        if (orderBy?.lastMessageAt) {
+          const dir = orderBy.lastMessageAt.sort === 'asc' ? 1 : -1;
+          rows = [...rows].sort((a, b) => {
+            // NULLS LAST: an empty conversation sorts below every active one,
+            // whichever direction the timestamps are ordered in.
+            if (a.lastMessageAt === null && b.lastMessageAt === null) return 0;
+            if (a.lastMessageAt === null) return 1;
+            if (b.lastMessageAt === null) return -1;
+            return (a.lastMessageAt.getTime() - b.lastMessageAt.getTime()) * dir;
+          });
+        }
+        if (!include) return rows;
+        return rows.map((row) => ({
+          ...row,
+          subscriber: users.find((u) => u.id === row.subscriberId) ?? null,
+          model: users.find((u) => u.id === row.modelId) ?? null,
+        }));
+      },
+      create: async ({ data }: { data: { subscriberId: string; modelId: string } }) => {
+        track('conversation.create');
+        // One conversation per pair — UNIQUE in Postgres, so the fake refuses a
+        // duplicate here rather than letting the service decide.
+        if (
+          conversations.some(
+            (c) => c.subscriberId === data.subscriberId && c.modelId === data.modelId,
+          )
+        ) {
+          throw new FakeUniqueConstraintError('subscriberId_modelId');
+        }
+        const row: FakeConversation = {
+          id: nextId('conv'),
+          subscriberId: data.subscriberId,
+          modelId: data.modelId,
+          lastMessageAt: null,
+          createdAt: new Date(),
+        };
+        conversations.push(row);
+        return row;
+      },
+      update: async ({
+        where,
+        data,
+      }: {
+        where: { id: string };
+        data: Partial<FakeConversation>;
+      }) => {
+        track('conversation.update');
+        const row = conversations.find((c) => c.id === where.id);
+        if (!row) throw new Error('record not found');
+        Object.assign(row, data);
+        return row;
+      },
+    },
+
+    message: {
+      create: async ({ data }: { data: Partial<FakeMessage> & { conversationId: string } }) => {
+        track('message.create');
+        const row: FakeMessage = {
+          senderId: '',
+          body: null,
+          attachmentType: null,
+          attachmentStorageKey: null,
+          attachmentMimeType: null,
+          attachmentSizeBytes: null,
+          readAt: null,
+          ...data,
+          id: nextId('msg'),
+          // Monotonic per insert so ordering is deterministic even when several
+          // messages land inside the same millisecond.
+          createdAt: new Date(Date.now() + seq),
+        };
+        // The CHECK constraint, enforced where Postgres enforces it: a message
+        // with neither a body nor an attachment must not become a row.
+        if (row.body === null && row.attachmentType === null) {
+          throw new Error('violates check constraint "Message_body_or_attachment_present"');
+        }
+        messages.push(row);
+        return row;
+      },
+      findUnique: async ({ where }: { where: { id: string } }) => {
+        track('message.findUnique');
+        return messages.find((m) => m.id === where.id) ?? null;
+      },
+      /**
+       * Two shapes: the cursor-paginated history read, and the one
+       * `distinct: ['conversationId']` read that fetches every conversation's
+       * newest message at once (Postgres DISTINCT ON).
+       */
+      findMany: async ({
+        where,
+        orderBy,
+        take,
+        cursor,
+        skip = 0,
+        distinct,
+      }: {
+        where: Where;
+        orderBy?: Array<Record<string, 'asc' | 'desc'>>;
+        take?: number;
+        cursor?: { id: string };
+        skip?: number;
+        distinct?: string[];
+        select?: Record<string, boolean>;
+      }) => {
+        track('message.findMany');
+        let rows = messages.filter((m) => messageMatches(m, where));
+        for (const clause of [...(orderBy ?? [])].reverse()) {
+          const [field, dir] = Object.entries(clause)[0];
+          const sign = dir === 'asc' ? 1 : -1;
+          rows = [...rows].sort((a, b) => {
+            const av = (a as unknown as Record<string, unknown>)[field];
+            const bv = (b as unknown as Record<string, unknown>)[field];
+            if (av instanceof Date && bv instanceof Date) {
+              return (av.getTime() - bv.getTime()) * sign;
+            }
+            return String(av).localeCompare(String(bv)) * sign;
+          });
+        }
+        if (distinct) {
+          const seen = new Set<string>();
+          rows = rows.filter((row) => {
+            const key = distinct
+              .map((field) => String((row as unknown as Record<string, unknown>)[field]))
+              .join('\u0000');
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
+        }
+        if (cursor) {
+          const at = rows.findIndex((m) => m.id === cursor.id);
+          // A cursor outside this result set pages nothing, which is exactly
+          // what a cursor from another conversation must do.
+          rows = at === -1 ? [] : rows.slice(at + skip);
+        }
+        return take === undefined ? rows : rows.slice(0, take);
+      },
+      /** Only the `by: ['conversationId'] + _count` unread-count shape. */
+      groupBy: async ({ where }: { by: string[]; where?: Where; _count?: unknown }) => {
+        track('message.groupBy');
+        const matched = messages.filter((m) => (where ? messageMatches(m, where) : true));
+        const totals = new Map<string, number>();
+        for (const row of matched) {
+          totals.set(row.conversationId, (totals.get(row.conversationId) ?? 0) + 1);
+        }
+        return [...totals].map(([conversationId, count]) => ({
+          conversationId,
+          _count: { _all: count },
+        }));
+      },
+      updateMany: async ({ where, data }: { where: Where; data: Record<string, unknown> }) => {
+        track('message.updateMany');
+        // Conditional by construction: the `where` names `readAt: null`, so a
+        // second mark-read matches zero rows exactly as it would in Postgres.
+        const matched = messages.filter((m) => messageMatches(m, where));
+        for (const row of matched) Object.assign(row, data);
+        return { count: matched.length };
+      },
+      count: async ({ where }: { where?: Where } = {}) => {
+        track('message.count');
+        return messages.filter((m) => (where ? messageMatches(m, where) : true)).length;
+      },
+    },
+
     /** Interactive transaction: runs the callback against this same client. */
     $transaction: async <T>(fn: (tx: unknown) => Promise<T>): Promise<T> => fn(client),
 
@@ -676,6 +933,13 @@ export function createFakePrisma() {
     __subscriptions: subscriptions,
     __payouts: payouts,
     __auditLogs: auditLogs,
+    __conversations: conversations,
+    __messages: messages,
+    /** Per-delegate call counts, for the "no N+1" assertions. */
+    __calls: calls,
+    __resetCalls: () => {
+      for (const key of Object.keys(calls)) delete calls[key];
+    },
   };
 
   return client;
@@ -816,5 +1080,44 @@ export function seedModel(prisma: FakePrisma, id: string, email: string): FakeUs
     updatedAt: now,
   };
   prisma.__users.push(row);
+  return row;
+}
+
+/** Seed a conversation directly, skipping the create endpoint. */
+export function seedConversation(
+  prisma: FakePrisma,
+  overrides: Partial<FakeConversation> & { subscriberId: string; modelId: string },
+): FakeConversation {
+  const row: FakeConversation = {
+    id: `conv_seed_${prisma.__conversations.length + 1}`,
+    lastMessageAt: null,
+    createdAt: new Date(),
+    ...overrides,
+  };
+  prisma.__conversations.push(row);
+  return row;
+}
+
+/** Seed a message directly, for history/read-receipt tests. */
+export function seedMessage(
+  prisma: FakePrisma,
+  overrides: Partial<FakeMessage> & { conversationId: string; senderId: string },
+): FakeMessage {
+  const n = prisma.__messages.length + 1;
+  const row: FakeMessage = {
+    id: `msg_seed_${n}`,
+    body: `Seeded ${n}`,
+    attachmentType: null,
+    attachmentStorageKey: null,
+    attachmentMimeType: null,
+    attachmentSizeBytes: null,
+    readAt: null,
+    // Spaced so ordering is deterministic without relying on clock resolution.
+    createdAt: new Date(Date.now() + n * 1000),
+    ...overrides,
+  };
+  prisma.__messages.push(row);
+  const conversation = prisma.__conversations.find((c) => c.id === row.conversationId);
+  if (conversation) conversation.lastMessageAt = row.createdAt;
   return row;
 }
