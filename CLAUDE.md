@@ -315,13 +315,33 @@ The provider is selected at startup via env var and injected via the container. 
 
 ---
 
-### Session 07 — Private Messaging ⏳ Pending
+### Session 07 — Real-Time Private Messaging ✅ Complete
 **File:** `.claude/sessions/session-07.md`  
-**Domain:** Real-time or async chat between subscriber and model
+**Domain:** 1:1 real-time messaging between subscriber and model, subscription-gated send, image/video attachments. No live video/voice calls, no group chats — out of scope by product decision.
+
+**Summary:**
+- `Conversation` (`@@unique([subscriberId, modelId])`, indexed on `(modelId, lastMessageAt)` and `(subscriberId, lastMessageAt)`) + `Message` (`attachmentType` enum `IMAGE|VIDEO`, `attachmentStorageKey` never serialized, indexed on `(conversationId, createdAt)` and `senderId`) added to Prisma, plus a hand-written `CHECK` (`body IS NOT NULL OR attachmentType IS NOT NULL`) since Prisma has no CHECK primitive — same pattern as the Session 06 revenue-split constraint. Migration `20260910120000_add_messaging` **generated and applied** to Supabase; all 9 migrations now live.
+- **New module `modules/messaging/`** — `messaging.routes.ts` (6 REST endpoints, multipart + `file-type` magic-byte validation, rate limits), `messaging.service.ts` (business logic, storage, fan-out), `messaging.schema.ts` (Zod), `messaging.ws.ts` (WebSocket delivery), `connections.ts` (in-memory `Map<userId, Set<socket>>` registry).
+- `POST /api/messages/conversations/:modelId` — subscriber-only, idempotent (201 first call / 200 on repeat, same row), **403 `subscription_required`** without an `ACTIVE` subscription to that model, 404 for an unknown/non-model id.
+- `GET /api/messages/conversations` — lists the caller's conversations, other participant, last-message preview (`[image]`/`[video]` when attachment-only), unread count. Exactly 3 queries regardless of conversation count: `conversation.findMany` + one `message.groupBy` (unread) + one `message.findMany` with `distinct: ['conversationId']` (last message per row) — no N+1.
+- `GET /api/messages/conversations/:conversationId/messages` — cursor-paginated (`before` + `limit`, max 100) history, participant-only, **404 not 403** for a non-participant (mirrors the Session 06 payout-detail pattern so conversation ids are not enumerable). Never serializes `attachmentStorageKey`.
+- `POST /api/messages/conversations/:conversationId/messages` — the **only** place a message is created (the WebSocket does not accept writes — one auditable write path, same discipline as Session 06.5's single `issueSubscriptionCharge` seam). **Live** `Subscription.status === 'ACTIVE'` check on every send when the sender is the subscriber (403 `subscription_inactive` otherwise, re-read fresh each time — never cached from conversation-creation time); the model is never gated and can always reply. History stays readable to both parties regardless of subscription state — nothing already paid for is retroactively hidden. Attachments: magic-byte + declared-Content-Type cross-check, **415** on mismatch or disallowed type, **413** over the 15 MB (image) / 100 MB (video) caps, stored at `messages/{conversationId}/{cuid2}.{ext}`. Rate-limited 60 sends/min/user; reads rate-limited 120/min/user (Claude Code's own addition, approved — history isn't a free firehose).
+- `GET /api/messages/attachments/:messageId` — participant-only (404 otherwise), mints a 60-second signed URL, identical TTL/discipline to Session 04's video serving. A message with no attachment is also a 404 — the three "doesn't exist" cases are indistinguishable to the caller.
+- `PATCH /api/messages/conversations/:conversationId/read` — marks the other participant's unread messages read; idempotent by its own `where` (`readAt: null`).
+- `GET /ws/messages` (`@fastify/websocket`) — authenticated during the upgrade via the existing httpOnly access-token cookie through the `authenticate` hook (never a query-string token), rejects unauthenticated upgrades with 401 before the handshake completes. **Broadcast-only**: inbound frames are never parsed. Capped at 3 concurrent connections per user; over the cap the socket is accepted then closed with a distinguishable close code.
+- Shared: `ConversationListItem`, `ConversationSummary`, `MessageItem`, `SendMessageRequest`/`Response`, `MESSAGE_ATTACHMENT_TYPES`, the `message.new` WS event payload type.
+- 37 new tests (234 total, zero regressions); `pnpm turbo run typecheck lint test build` all green.
+
+**Notes / deviations:**
+- **`MessageAttachmentType` is a new Prisma enum, not a reuse of `ContentType`.** Identical values today, but chat attachments and the monetized content library have different size caps and different futures — widening one must not silently widen the other.
+- **Attachment validation failures are 415, not Session 04's 400** — the spec named 415 explicitly for this endpoint; size overruns stay 413, matching Session 04.
+- **Error bodies carry machine codes** (`subscription_required`, `subscription_inactive`, `empty_message`, `conversation_not_found`, `attachment_not_found`, …) in the existing `{ error: string }` shape — a UI needs to distinguish "buy a subscription" from "renew a lapsed one."
+- **Read-endpoint rate limit (120/min/user)** and the extra `Message.senderId` index were added by Claude Code beyond the literal spec text — both are operational guard-rails, not new features, and are approved.
+- **The fan-out registry is process-local (`connections.ts`).** It only reaches recipients connected to the same instance. Fine for a single-instance MVP; horizontal scaling of the API needs a shared pub/sub layer (Redis/NATS) to fan out across processes — flagged as an Open Item, not solved here. The service depends only on an injected `send(userId, event)` seam, so that swap stays in the wiring layer and never touches `messaging.service.ts`.
+- **DB connectivity note:** the Supabase project had paused; `prisma migrate deploy` must be run from `apps/api` (or via `pnpm --filter @creator-platform/api exec prisma migrate deploy`) — running it from the repo root can resolve the wrong `prisma` binary entirely (a bare `npx prisma` from a directory with no local install can fetch an unrelated package from the registry, producing CLI errors that don't match Prisma's actual command set at all).
 
 **External Prerequisites:**
-- [ ] No new external accounts required
-- [ ] (Optional) If using Pusher for WebSockets: https://pusher.com → create account (free tier) → create app → copy keys
+- [x] No new external accounts required — self-hosted `@fastify/websocket`, no Pusher/Ably dependency taken
 
 ---
 
@@ -471,6 +491,22 @@ _Session 06.5 — subscription lifecycle decisions:_
 - **The sweep is idempotent by query, not by claim.** Unlike the payout run it moves no money by itself, so it needs no claim/rollback machinery: reminders are guarded by "does an unpaid `SUBSCRIPTION` charge already exist for this pair", and each transition is an `updateMany` whose `where` names the status being moved *from*. Re-running matches zero rows.
 
 - **The renewal rail comes from the last confirmed payment's currency.** `Subscription.provider` names an adapter, not a channel, so it cannot answer which rail to renew on. `channelForCurrency` inverts the existing `CHANNEL_CURRENCY` table instead of introducing a second mapping to keep in sync; a subscription with no confirmed payment is skipped and audited rather than renewed on a guess.
+
+_Session 07 — real-time messaging decisions:_
+
+- **`@fastify/websocket`, self-hosted, over a managed pub/sub.** It runs inside the existing Fastify process, so real-time delivery costs no new hosted service and needs no second identity system — the socket authenticates through the same httpOnly cookie and `authenticate` hook the REST routes already use, because a WebSocket upgrade is still an HTTP request. Pusher/Ably (CLAUDE.md's original "optional" prerequisite) would mean paying per connection and shipping the subscriber graph to a third party for something a single MVP instance serves for free. Socket.IO was rejected too — its own protocol, client library and room semantics solve problems this session doesn't have.
+
+- **The WebSocket is broadcast-only; there is exactly one place a message is written.** `POST /api/messages/conversations/:id/messages` is the only creation path — the socket ignores every inbound frame. This is the same "one call site" discipline as Session 06.5's `issueSubscriptionCharge`: one path to validate, gate and rate-limit, with fan-out reduced to a pure read-side concern.
+
+- **Subscription gating is re-read live on every send, never cached from conversation creation.** A subscriber's `Subscription.status` can change (lapse, cancel, resume) between opening a conversation and sending message #50; caching the check at creation time would let a lapsed subscriber keep messaging indefinitely. The model is never gated by the same check — blocking a model from answering a paying customer's last message because that customer's billing lapsed would be the wrong failure mode for a creator-monetization product.
+
+- **404, not 403, for a non-participant on any conversation/message/attachment endpoint.** Identical reasoning to Session 06's payout-detail endpoint: a 403 confirms the id exists, turning it into an enumeration oracle. A 404 makes "wrong id" and "not yours" indistinguishable.
+
+- **`attachmentStorageKey` never leaves the service layer.** `toMessageItem` (the only function that turns a `Message` row into client-visible JSON) has no field for it — the same "not in the output type, so no caller can leak it by forgetting to strip it" property `Content.storageKey` and `ReferenceImage.storageKey` already have. Delivery is exclusively a 60-second signed URL, minted per-request after a participation check.
+
+- **`MessageAttachmentType` is its own enum, not a reuse of `ContentType`.** Chat attachments (15 MB image / 100 MB video cap) and the monetized content library (50 MB / 500 MB) are different products with different futures; sharing an enum would couple caps that need to move independently.
+
+- **The fan-out registry (`connections.ts`) is process-local by design, not by oversight.** A single MVP instance needs nothing more elaborate than an in-memory `Map<userId, Set<socket>>`. Horizontal scaling of the API would need a shared layer (Redis pub/sub or similar) so an event reaches a recipient connected to a *different* process — logged as an Open Item, deliberately not solved in this session. The service only depends on an injected `send(userId, event)` seam, so that swap stays in the wiring layer.
 
 _Post-Session 05 — scope correction:_
 
@@ -671,7 +707,9 @@ All `.env*` files are gitignored; examples contain placeholders only.
 - **Paxum → Woovi/NOWPayments wire** — model payouts via Paxum require the platform to accumulate earnings from Woovi and NOWPayments, then fund the Paxum business account. Still a manual treasury step outside the codebase (Session 06 automates the *distribution*, not the *funding*); document the SOP before the first live run.
 - **MEI faturamento limit** — MEI CNPJ 67.735.318/0001-91 has R$130k/year revenue cap. When platform revenue approaches this threshold, migrate to ME (Microempresa) with a contador. This unlocks higher volume and formal payroll if needed.
 - **Telegram Stars** — optional secondary channel for microtransactions on Telegram bots. ~32% effective fee on mobile purchases. 21-day withdrawal hold. iOS restrictions on adult content via Stars. Not a primary payment channel — integrate only if there is an active Telegram community.
+- **Messaging fan-out is process-local, not horizontally scalable** (Session 07) — `connections.ts` holds an in-memory `Map<userId, Set<socket>>`. A recipient connected to a different API instance never receives the live push (they still see the message on next history fetch — nothing is lost, just not real-time across instances). Needs a shared pub/sub (Redis or similar) before running more than one API instance. Candidate: Session 12/13 alongside deployment.
+- **`npx prisma` must be run from `apps/api`, not the repo root** (Session 07 tooling note) — in this pnpm workspace, `prisma` is a devDependency of `@creator-platform/api` only. Running a bare `npx prisma migrate deploy` from the monorepo root can resolve an unrelated package instead of the pinned local CLI, producing confusing errors with no resemblance to Prisma's actual command set. Always `cd apps/api` first, or use `pnpm --filter @creator-platform/api exec prisma <command>`.
 
 ---
 
-## Last Updated — Session 06.5 complete: subscription lifecycle (renewal charge issued ahead of `currentPeriodEnd` through the payments module's single `issueSubscriptionCharge` seam, reminder email on the existing Resend `Emailer`, `ACTIVE → PAST_DUE → EXPIRED` grace path for non-payers and `ACTIVE → CANCELED` for opt-outs, self-service `GET /me` + `cancel` + `resume`, daily cron sweep behind a timing-safe service secret). `Subscription.cancelAtPeriodEnd` keeps "will it renew" apart from "what access is live". 197 tests green. Migration `20260902120000_add_subscription_lifecycle` generated **and applied** — all 8 migrations now live on Supabase. Next: Session 07 (private messaging). Pix Automático logged as a future candidate, not a blocker [2026-09-02]
+## Last Updated — Session 07 complete: real-time private messaging (`Conversation`/`Message` models, subscriber-only conversation creation gated by an `ACTIVE` subscription, live per-send subscription re-check with the model never gated, text + image/video attachments reusing the Session 04 `StorageClient`/`file-type` upload pattern, `@fastify/websocket` broadcast-only real-time delivery authenticated via the existing httpOnly cookie, 404-not-403 non-participant handling, cursor-paginated history, no-N+1 conversation list). 234 tests green. Migration `20260910120000_add_messaging` generated **and applied** — all 9 migrations now live on Supabase. Next: Session 08 (AI image personalization). Messaging fan-out is process-local — logged as an Open Item for horizontal scaling, not a blocker [2026-09-10]
