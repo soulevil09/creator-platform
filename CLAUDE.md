@@ -278,6 +278,43 @@ The provider is selected at startup via env var and injected via the container. 
 
 ---
 
+### Session 06.5 — Subscription Lifecycle: Renewal & Cancellation ✅ Complete
+**File:** `.claude/sessions/session-06.5.md`  
+**Domain:** Renewal charge issuance ahead of `currentPeriodEnd`, reminder email, grace period, self-service cancel/resume, honest `Subscription.status`
+
+**Summary:**
+- `Subscription.cancelAtPeriodEnd Boolean @default(false)` + `@@index([status, cancelAtPeriodEnd, currentPeriodEnd])` added to Prisma; migration `20260902120000_add_subscription_lifecycle` **generated and applied** (8 migrations now live).
+- **New module `modules/subscriptions/`** — lifecycle orchestration kept out of `payments.service.ts`, the same separation Session 06 made between `payouts/` and `payments/`. It creates no charges of its own.
+- **One `IPaymentProvider` call site for subscription revenue.** `createSubscriptionCheckout`'s body was extracted into `paymentsService.issueSubscriptionCharge({ userId, modelId, tier, provider })`, called by both the public endpoint and the renewal sweep; the endpoint is now a two-line delegate. All 41 Session-05 payments tests pass unmodified.
+- `POST /api/subscriptions/renewals/run` — guarded by `X-Renewal-Cron-Secret` compared with `crypto.timingSafeEqual` against `SUBSCRIPTION_RENEWAL_CRON_SECRET` (never `===`), rejected 401 before any DB access, rate-limited 4/hour (higher than the payout run's 2/hour: a daily job may legitimately need a same-day retry). Four passes, in order:
+  1. **Reminders** — `ACTIVE`, `cancelAtPeriodEnd: false`, `currentPeriodEnd` within `SUBSCRIPTION_RENEWAL_REMINDER_DAYS` (default 3) → skip if a `PENDING` `SUBSCRIPTION` transaction already exists for the pair, else `issueSubscriptionCharge` + `sendRenewalReminderEmail`.
+  2. **Grace start** — lapsed non-payers `ACTIVE → PAST_DUE`.
+  3. **Grace end** — `PAST_DUE` past `currentPeriodEnd + SUBSCRIPTION_GRACE_PERIOD_DAYS` (default 3) → `EXPIRED`.
+  4. **Cancellations landing** — `ACTIVE` + `cancelAtPeriodEnd: true` past `currentPeriodEnd` → `CANCELED`, never `PAST_DUE`.
+  Response is aggregates only: `{ remindersIssued, movedToPastDue, movedToExpired, movedToCanceled }`.
+- `GET /api/subscriptions/me` — `authenticate` + `authorize('subscriber')`, scoped by JWT `userId`; returns `subscriptionId`/`modelId`/`tier`/`status`/`currentPeriodEnd`/`cancelAtPeriodEnd`.
+- `POST /api/subscriptions/model/:modelId/cancel` — sets `cancelAtPeriodEnd: true`. Does **not** touch `status` or revoke any `ContentAccess`: the subscriber bought this period and keeps it. Idempotent (200 no-op, no second audit row). Audited with `accessRetainedUntil`.
+- `POST /api/subscriptions/model/:modelId/resume` — clears the flag, **only while `status: ACTIVE`**; 409 once the row has moved on (`PAST_DUE`/`EXPIRED`/`CANCELED`) — resubscribing through normal checkout is a simpler mental model than resurrecting a lapsed row. 404 for a pair the caller has no subscription to, identical to the 404 for a nonexistent model.
+- `Emailer` gains `sendRenewalReminderEmail(to, params)` — the same Resend seam the auth verification email uses. The reminder carries the actual instrument (PIX copia-e-cola, or crypto address + amount), since the charge is already payable when it is sent. All interpolated values are HTML-escaped.
+- `.github/workflows/subscription-renewals.yml` — `cron: '0 6 * * *'` (daily 06:00 UTC), `workflow_dispatch`, `concurrency` guard, secret read from the environment so it never reaches the run log.
+- Shared: `DEFAULT_SUBSCRIPTION_RENEWAL_REMINDER_DAYS`, `DEFAULT_SUBSCRIPTION_GRACE_PERIOD_DAYS`, `SubscriptionListItem`, `MySubscriptionsResponse`, `SubscriptionRenewalRunSummary`, `channelForCurrency`.
+- 21 new tests (197 total, zero regressions); `pnpm turbo run typecheck lint test build` all green.
+
+**Notes / deviations:**
+- **`cancelAtPeriodEnd` is a boolean, not a fifth `SubscriptionStatus`.** `status` answers exactly one question — what access does this subscriber have right now. A subscriber who cancels on day 2 of a 30-day period is still fully `ACTIVE` for 28 more days, because they paid for them. Folding "will renew" into `status` would mean either lying about their access or inventing a `CANCELING` state every access check would then have to learn. As a separate column, no existing access-control code changed at all, and the two terminal outcomes stay queryable apart: `CANCELED` is churn, `EXPIRED` is payment failure.
+- **The renewal rail is derived from the currency of the last confirmed payment, not from `Subscription.provider`.** `provider` names an *adapter* (`PAYMENT_PROVIDER_PIX=mock` records `CCBILL_MOCK`), so it cannot answer "which channel". `channelForCurrency` in `@creator-platform/shared` inverts the existing `CHANNEL_CURRENCY` table rather than adding a second mapping that could drift from it. A subscription with no confirmed payment, or a currency no channel bills in, is skipped and audited (`subscription.renewal_skipped_no_channel`) rather than renewed on a guessed rail.
+- **Pass 1 runs before pass 2 on purpose.** A subscription that lapsed since the last run (a missed cron day) gets a payable charge in the same sweep that opens its grace window, rather than waiting another day for one.
+- **The webhook upsert now also clears `cancelAtPeriodEnd`** — one field beyond what the spec called for. Paying for another period is an unambiguous statement of intent to continue; without it, a subscriber who cancelled and then deliberately re-subscribed would be silently cancelled again at the end of the period they just paid for.
+- **The sweep needs none of the payout run's claim/rollback machinery.** It moves no money by itself. Each pass is idempotent by its own query: reminders by the existing-`PENDING` check, transitions by an `updateMany` whose `where` names the status being moved *from*, so a re-run matches zero rows.
+- **A bounced reminder email does not undo the charge or fail the run** — the charge is already recorded and payable, the failure is audited (`subscription.renewal_reminder_email_failed`), and tomorrow's run finds it outstanding and issues no second one.
+- **Access enforcement was not touched.** `ContentAccess.expiresAt` was already written to expire with `currentPeriodEnd` and is checked live at serve time, so a lapse cuts access off on its own. The status transitions are honest bookkeeping for admin/model reporting; nothing gates on them.
+- **ARIA validation:** this session ships no frontend UI. `eslint-plugin-jsx-a11y` (Session 05) still runs over `**/*.tsx` in CI with zero findings — lint is green.
+
+**External Prerequisites:**
+- [ ] Generate `SUBSCRIPTION_RENEWAL_CRON_SECRET` (`openssl rand -hex 32`) and store it as a GitHub Actions repository secret (alongside the existing `API_PUBLIC_URL`)
+
+---
+
 ### Session 07 — Private Messaging ⏳ Pending
 **File:** `.claude/sessions/session-07.md`  
 **Domain:** Real-time or async chat between subscriber and model
@@ -423,6 +460,18 @@ _Session 06 — payouts implementation decisions:_
 
 - **`PaxumAdapter` ships pre-approval, like Woovi and NOWPayments did.** The Business account is not approved, so the wire format is written against Paxum's publicly documented mass-payout mechanics and exercised only against `nock`. Every provisional name is marked as such in the adapter and tracked as an Open Item. What is *not* provisional is the seam: correcting a field name later touches one class.
 
+_Session 06.5 — subscription lifecycle decisions:_
+
+- **"Will it renew" is a separate column from "what access is live".** `Subscription.status` means one thing: the subscriber's current access state. `cancelAtPeriodEnd` means another: whether a renewal charge will be issued. Merging them into a fifth status value would force every access check to learn a `CANCELING` state that grants full access — or force us to mark someone `CANCELED` while they still have 28 paid-for days. Kept apart, no access-control code changed at all, and churn (`CANCELED`) stays queryable apart from payment failure (`EXPIRED`), which are different business signals.
+
+- **Renewal is a fresh charge, not a stored mandate.** PIX and crypto are one-shot instruments: there is nothing to pull from. So the sweep issues a new charge a few days early, emails it, and allows a grace window after the period ends — a design that works identically for both rails through the existing `IPaymentProvider`. Woovi's Pix Automático (a BACEN recurring mandate) would improve this for PIX subscribers specifically, and is tracked as a future candidate rather than built here.
+
+- **One `IPaymentProvider` call site for subscription revenue.** `issueSubscriptionCharge` is called by both the checkout endpoint and the renewal sweep. A renewal is not a different kind of payment, and duplicating the call site would have meant two places to keep the catalog price, the eligibility gates and the idempotency key in step.
+
+- **The sweep is idempotent by query, not by claim.** Unlike the payout run it moves no money by itself, so it needs no claim/rollback machinery: reminders are guarded by "does an unpaid `SUBSCRIPTION` charge already exist for this pair", and each transition is an `updateMany` whose `where` names the status being moved *from*. Re-running matches zero rows.
+
+- **The renewal rail comes from the last confirmed payment's currency.** `Subscription.provider` names an adapter, not a channel, so it cannot answer which rail to renew on. `channelForCurrency` inverts the existing `CHANNEL_CURRENCY` table instead of introducing a second mapping to keep in sync; a subscription with no confirmed payment is skipped and audited rather than renewed on a guess.
+
 _Post-Session 05 — scope correction:_
 
 - **PPV was scaffolded in Session 04 but is out of product scope (see original brief) — removed in a post-Session-05 correction; access to PREMIUM content is subscription-only.** `Content.ppvPriceCents` dropped (migration `20260831025136_remove_ppv`), the `ppv_purchase` grant reason retired, and `resolveAccess` now admits PREMIUM on `subscription_premium` alone (owner/admin unchanged).
@@ -504,13 +553,16 @@ creator-platform/
 │       │   │       ├── revenue.ts           # computeRevenueSplit (80/20)
 │       │   │       ├── payouts.routes.ts / .service.ts / .schema.ts
 │       │   │       └── payouts.test.ts      # 67 tests
+│       │   ├── subscriptions/               # lifecycle (Session 06.5)
+│       │   │   ├── subscriptions.routes.ts / .service.ts / .schema.ts
+│       │   │   └── subscriptions.test.ts    # 21 tests
 │       │   ├── test/
 │       │   │   └── fake-prisma.ts           # shared in-memory Prisma stand-in
 │       │   └── types/
 │       │       └── fastify-jwt.d.ts
 │       ├── prisma/
-│       │   ├── schema.prisma        # User, ModelProfile (+payoutEmail), Content, payments + Payout models + enums
-│       │   ├── migrations/          # …_add_user_model, …_add_model_profile, …_add_content_management, …_add_payments, …_remove_ppv, …_add_payouts, …_add_payout_email
+│       │   ├── schema.prisma        # User, ModelProfile (+payoutEmail), Content, payments (+cancelAtPeriodEnd) + Payout models + enums
+│       │   ├── migrations/          # …_add_user_model, …_add_model_profile, …_add_content_management, …_add_payments, …_remove_ppv, …_add_payouts, …_add_payout_email, …_add_subscription_lifecycle
 │       │   └── generated/           # Prisma client output (gitignored)
 │       ├── scripts/
 │       │   └── postinstall.mjs
@@ -523,7 +575,8 @@ creator-platform/
 │       └── src/index.ts             # Role, JwtPayload, AuthUser + locale/currency constants
 ├── .github/workflows/
 │   ├── ci.yml
-│   └── weekly-payout.yml            # Mon 12:00 UTC → POST /api/payouts/run
+│   ├── weekly-payout.yml            # Mon 12:00 UTC → POST /api/payouts/run
+│   └── subscription-renewals.yml    # daily 06:00 UTC → POST /api/subscriptions/renewals/run
 ├── .claude/sessions/
 ├── tsconfig.base.json
 ├── turbo.json
@@ -580,6 +633,9 @@ All `.env*` files are gitignored; examples contain placeholders only.
 | `REVENUE_SHARE_MODEL_PCT` | api | 06 | Model's cut of a confirmed subscription, whole percent (default `80`) |
 | `PAYOUT_MIN_THRESHOLD_CENTS` | api | 06 | Minimum payable balance in minor units (default `5000` = R$50) |
 | `PAYOUT_CURRENCY` | api | 06 | Currency Paxum settles payouts in (default `BRL`) |
+| `SUBSCRIPTION_RENEWAL_CRON_SECRET` | api | 06.5 | Shared secret for `POST /api/subscriptions/renewals/run` (timing-safe compare); mirrored as a GitHub Actions repo secret |
+| `SUBSCRIPTION_RENEWAL_REMINDER_DAYS` | api | 06.5 | Days before `currentPeriodEnd` the renewal charge + reminder go out (default `3`) |
+| `SUBSCRIPTION_GRACE_PERIOD_DAYS` | api | 06.5 | Days a non-payer stays `PAST_DUE` before `EXPIRED` (default `3`) |
 | `AI_PROVIDER` / `AI_PROVIDER_API_KEY` | api | 08 | AI image provider switch + key (Replicate) |
 | `NEXT_PUBLIC_APP_URL` / `NEXT_PUBLIC_API_URL` | web | — | Public URLs for the web app |
 | `NEXT_PUBLIC_DEFAULT_LOCALE` | web | 10 | Default UI locale (`pt-BR` \| `en`) |
@@ -603,7 +659,10 @@ All `.env*` files are gitignored; examples contain placeholders only.
 - **Payout earnings are summed in minor units without FX conversion** (Session 06) — the balance query sums `modelShareCents` across currencies, and a claim whose rows disagree falls back to `PAYOUT_CURRENCY`. Harmless while PIX/BRL dominates; a model earning in both BRL (PIX) and USD (crypto) needs per-currency payouts and an FX policy. Candidate: Session 11 alongside the admin dashboard.
 - **Credit-pack revenue is not shared with models** (Session 06, by design) — credits are a wallet-wide balance with no per-model attribution until AI generation ships. Extending payouts to cover credit spend is explicit Session 08 follow-up work, once generation events carry a `modelId`.
 - **No `Payout` reconciliation job** (Session 06) — a `PROCESSING` payout whose IPN never arrives stays `PROCESSING` forever; there is no sweeper that re-queries Paxum for stale batches. Add one when real volume exists (Session 11/12 candidate).
-- **Subscription renewal and cancellation are not implemented** (Session 05) — a confirmed payment activates a 30-day period and grants `ContentAccess` rows that expire with it, so a lapse revokes access on its own. What is missing is the renewal charge, `POST /cancel`, and handling of `PAST_DUE`. Candidate: Session 06 alongside payouts.
+- ~~**Subscription renewal and cancellation are not implemented**~~ — **resolved in Session 06.5.** A daily cron-triggered sweep (`POST /api/subscriptions/renewals/run`) issues a renewal charge + reminder email before `currentPeriodEnd`, walks lapsed non-payers `ACTIVE → PAST_DUE → EXPIRED` across a configurable grace window, and lands opted-out subscribers on `CANCELED`. `Subscription.cancelAtPeriodEnd` (migration `20260902120000_add_subscription_lifecycle`, applied) backs self-service `POST /model/:modelId/cancel` and `/resume`.
+- **Pix Automático is a future upgrade, not a blocker** (Session 06.5) — Woovi supports Pix Automático, BACEN's recurring-mandate scheme, which would let a PIX subscription be pulled automatically instead of re-charged and re-paid each period. It is a separate, larger retrofit (mandate registration and its own consent/cancellation lifecycle, PIX-only, no crypto equivalent), so Session 06.5 deliberately shipped manual renewal that works identically on both rails. Revisit once PIX renewal volume makes the drop-off from manual payment measurable — candidate alongside Session 11/12.
+- **Renewal charges accumulate as `PENDING` rows when never paid** (Session 06.5) — an unpaid renewal charge stays `PENDING` forever, and that is exactly what keeps the sweep idempotent (it is the "already charged" marker). Harmless at MVP, but there is no expiry sweep, so a long-churned subscriber leaves one stale row per model. Fold into the reconciliation job flagged for Session 11/12.
+- **Renewal reminders are not internationalized** (Session 06.5) — the reminder email is English-only, like the verification email. Both are externalized in Session 10 (i18n).
 - **Content published after a subscription starts is not auto-granted** (Session 05) — `ContentAccess` rows are written at confirmation time for the model's then-published catalogue. New uploads mid-period need either a grant-on-publish hook or a subscription-aware check in `resolveAccess`. Revisit when upload cadence matters.
 - **Woovi adult content policy** — Woovi/OpenPix é um gateway PIX brasileiro regulado. Antes de ir ao ar em produção com conteúdo explícito adulto, confirmar com o suporte deles (suporte@woovi.com) se aceitam plataformas adult 18+. PIX em si não tem restrição de conteúdo (é infraestrutura do Banco Central), mas o gateway pode ter política própria.
 - **CCBill deferred to post-MVP** — $1,450/yr Visa+MC registration fees make card processing financially unviable at MVP stage. CCBill slot is scaffolded as `MockPaymentProvider`. Activate when monthly revenue covers the annual fee.
@@ -615,4 +674,4 @@ All `.env*` files are gitignored; examples contain placeholders only.
 
 ---
 
-## Last Updated — Session 06 complete: revenue sharing & payouts (80/20 split stamped per confirmed subscription, ledger-derived model balance, `PaxumAdapter` + `MockPayoutProvider` on `IPayoutProvider`, weekly cron-triggered payout run with compare-and-set claiming and failure rollback, Paxum IPN, admin payout visibility), plus the `payoutEmail` addendum (self-service payout destination on `ModelProfile`, UNIQUE + audited; runs skip models without one). 176 tests green. Migrations `20260901120000_add_payouts` and `20260901180000_add_payout_email` generated **and applied** — all 7 migrations now live on Supabase [2026-09-01]
+## Last Updated — Session 06.5 complete: subscription lifecycle (renewal charge issued ahead of `currentPeriodEnd` through the payments module's single `issueSubscriptionCharge` seam, reminder email on the existing Resend `Emailer`, `ACTIVE → PAST_DUE → EXPIRED` grace path for non-payers and `ACTIVE → CANCELED` for opt-outs, self-service `GET /me` + `cancel` + `resume`, daily cron sweep behind a timing-safe service secret). `Subscription.cancelAtPeriodEnd` keeps "will it renew" apart from "what access is live". 197 tests green. Migration `20260902120000_add_subscription_lifecycle` generated **and applied** — all 8 migrations now live on Supabase. Next: Session 07 (private messaging). Pix Automático logged as a future candidate, not a blocker [2026-09-02]
