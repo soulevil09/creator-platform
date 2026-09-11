@@ -31,7 +31,7 @@ more robust/expensive services as revenue scales.
 | Payments (card — deferred) | _(CCBill — locked, post-MVP)_ | CCBill is the confirmed future card processor for international Visa/Mastercard. Requires Visa ($950/yr) + Mastercard ($500/yr) high-risk registration fees — deferred until platform generates enough revenue to absorb. Architecture is abstraction-ready on day one. |
 | Model payouts | **Paxum** mass payout REST API | Industry-standard for adult creator payouts. Implemented Session 06 as `PaxumAdapter implements IPayoutProvider`, selected via `PAYOUT_PROVIDER`. Weekly run triggered by a GitHub Actions cron job hitting `POST /api/payouts/run` behind a timing-safe service secret. 80/20 split (model/platform), R$50 minimum threshold. Wire format is provisional until the Business account is approved — see Open Items. |
 | Lint / Format | ESLint 9 (flat) + Prettier | One root config governs all packages; modern TS standard. |
-| Tests | Vitest | ESM/TS-native, Jest-compatible, fast. In-memory mocks for DB + email in auth tests. |
+| Tests | Vitest (+ `@testing-library/react` / jsdom for `apps/web`, Session 09) | ESM/TS-native, Jest-compatible, fast. In-memory mocks for DB + email in auth tests. The web package got its first suite in Session 09: jsdom environment for DOM-behaviour tests, RTL for user-perceived queries. |
 | CI | GitHub Actions | Free tier, native GitHub integration. |
 
 > ⚠️ **Stripe is permanently excluded** from this project. Stripe explicitly prohibits adult content, AI-generated adult images, and credit-based adult platforms. Any suggestion to use Stripe must be rejected.
@@ -386,13 +386,47 @@ The provider is selected at startup via env var and injected via the container. 
 
 ---
 
-### Session 09 — Anti-Leak & Content Protection ⏳ Pending
+### Session 09 — Anti-Leak & Content Protection ✅ Complete
 **File:** `.claude/sessions/session-09.md`  
-**Domain:** Signed expiring URLs, screenshot deterrents, watermark hardening
+**Domain:** Per-viewer forensic watermarking (traceability), video trace via client overlay (Option B), client-side capture deterrents, storage hygiene sweep for orphaned objects
+
+**Product decisions locked for this session:** the client-side layer is a **deterrent, not a security control** and is documented as such everywhere it appears; video keeps raw signed-URL delivery with a per-viewer trace overlay in the player (no ffmpeg); a leaked file is traced through the `AuditLog`, never by decoding anything in the file itself. Lei FELCA (age verification) is explicitly out of scope → Session 09.5.
+
+**Summary:**
+- **New module `modules/protection/`** — `trace.ts`: `computeTraceCode({ secret, entityId, viewerId, servedAt })` = `HMAC-SHA256(WATERMARK_TRACE_SECRET, entityId\nviewerId\nminute)` → first 5 bytes → **8 chars RFC 4648 base32** (exactly 40 bits; alphabet has no 0/O, 1/I ambiguity). Deterministic per (entity, viewer, minute): the same viewer refreshing within a minute gets one code, two viewers of the same item get different ones. `traceWatermarkLabel(code)` = `CreatorPlatform • <code>` is the **only** text that reaches the renderer. `createTraceRecorder({ prisma, secret })` mints the code and writes the lookup row — `AuditLog { actorId: viewerId, action: 'content.served' | 'generation.image_served', entity, entityId, metadata: { viewerId, traceCode, servedAt } }` — **awaited, one row per serve**. Both the content and generation modules call this one implementation; neither computes a code of its own.
+- **D1 — images.** `GET /api/content/:contentId/serve` and `GET /api/generations/:id/image` now watermark with brand + trace code. **The requester's email is gone from the watermark** (Session 04 burned `brand • email`; a leaked file must not carry PII). `ImageProcessor.watermark(buffer, text, mimeType)` is **unchanged** — the trace is a policy concern composed into the label by the service, so the sharp-backed processor, its interface and every test fake stayed untouched.
+- **D2 — video, Option B.** `GET /api/content/:contentId/serve` for `VIDEO` returns `{ signedUrl, expiresIn: 60, traceCode }` (`ContentVideoServeResponse` gains `traceCode`), same helper, same AuditLog row. The file behind the URL is **not** watermarked; the residual risk (direct fetch within the 60 s TTL yields the unmarked original) is documented in `content.service.ts`, the shared type, the component and the Architecture Decisions below.
+- **D3 — `apps/web/src/components/ProtectedMedia.tsx`.** Wrapper (`role="group"`) that prevents `contextmenu` and `dragstart`, sets `user-select: none` / `draggable={false}`, blurs its content (`filter: blur(24px)`) and pauses any *playing* `<video>` on `document.visibilitychange → hidden` or `window.blur`, and restores (resuming only what it paused) on return; renders `traceCode` as a persistent `aria-hidden` low-opacity overlay with `pointer-events: none`; announces the obscured state through a `role="status"` live region. File header + JSDoc state plainly that these are deterrents and cannot stop an OS screenshot, a recorder or a camera. Demo route `apps/web/src/app/dev/protected-media/page.tsx` — inline-SVG placeholder image + source-less placeholder `<video muted>`, fixed fake codes, **`notFound()` in production**; never points at the real API. **7 component tests** (`ProtectedMedia.test.tsx`) — the web package's first suite (`apps/web/vitest.config.ts`: jsdom + `esbuild.jsx: 'automatic'`, no Vite React plugin taken).
+- **D4 — `POST /api/admin/storage/cleanup/run`** (`modules/storage-cleanup/`). Guarded by `X-Storage-Cleanup-Cron-Secret` vs `STORAGE_CLEANUP_CRON_SECRET` with the same local `secretMatches` (`crypto.timingSafeEqual`, length-checked) as the payout/renewal runs, rejected 401 before any DB/storage access, 4/hour. Sweeps `Content` rows with `deletedAt IS NOT NULL AND storageKey IS NOT NULL` and `GenerationJob` rows with `status = COMPLETED AND expiresAt <= now AND storageKey IS NOT NULL`, in **id-ordered keyset pages of 100** (`CLEANUP_BATCH_SIZE`), `select: { id, storageKey }` only. Per row: `StorageClient.deleteFile` → compare-and-set `updateMany({ where: { id, storageKey: <the key just deleted> }, data: { storageKey: null } })`. Delete-then-null, so a crash between the two is healed by the next run (S3 DeleteObject on a missing key is a no-op); the CAS makes an overlapping run count the row as `skipped`, never twice as `deleted`. A provider error counts `failed` and leaves the key for tomorrow. Response and summary `AuditLog` row (`storage.cleanup_run_completed`) carry **counts only** (`{ deleted, skipped, failed }`; the audit metadata adds up to 50 failed row *ids*, never a key). Migration **`20260912120000_nullable_content_storage_key`** (`Content.storageKey` → nullable) **generated and applied** — 11 migrations live. `.github/workflows/storage-cleanup.yml` — daily 07:00 UTC (one hour after the renewal sweep), `workflow_dispatch`, `concurrency` guard, secret read from the environment.
+- `env.ts`: `WATERMARK_TRACE_SECRET` via new `requiredMinLength(name, 32)` — required in **every** environment like `JWT_SECRET`, plus a length floor because the whole value is HMAC entropy; `STORAGE_CLEANUP_CRON_SECRET` via `requiredInProduction`. Both in `vitest.setup.ts` and both `.env.example` files.
+- Shared: `ContentVideoServeResponse.traceCode`, `StorageCleanupRunSummary`.
+- Test infra: `test/fake-prisma.ts` gained `content.update/updateMany`, keyset/cursor pagination shared between `content.findMany` and `generationJob.findMany` (`paginate`), and a generic `rowMatches` with `lt/lte/gt/gte` on dates and strings; `FakeContent.storageKey` is now nullable + `viewCount`. The content suite's local fake gained `auditLog.create`.
+- **22 new API tests** (331 total, zero regressions) + **7 web tests**; `pnpm turbo run typecheck lint test build` and root `pnpm lint` (incl. jsx-a11y) all green.
+
+**Notes / deviations:**
+- **`ImageProcessor` interface unchanged (no `watermarkWithTrace`).** The spec left this to the implementer. The processor is a rendering primitive that knows nothing about viewers; "what text goes on the image" is a service decision (it already was — the service used to build `brand • email`). Composing the label in the service kept the sharp implementation, the interface and all fakes untouched and still satisfies "renders the code alongside current branding".
+- **`secretMatches` is duplicated locally a third time**, exactly as `payouts.routes.ts` and `subscriptions.routes.ts` each carry their own. Extracting a shared helper would have meant editing two prior-session files for a six-line function; the pattern in this codebase is one local copy per cron route, and the spec said to mirror it exactly.
+- **Keyset (`id > cursor`) rather than Prisma `cursor: { id }`, skip 1.** The pattern is the same opaque last-id cursor `GET /api/generations` threads as `nextCursor`; the predicate form differs because the cursor row has *just left the filtered set* (its key was nulled) and a keyset predicate says "everything after it" with no dependence on how the engine positions a cursor that no longer matches the `where`.
+- **`Content.storageKey` became nullable** (one migration, one `DROP NOT NULL`). This is what makes "storageKey never exposed" true at rest and a re-run a fast no-op — the spec's "consider nulling" was taken. `serve` treats a null key as 404 (a purged row is already a tombstone); the list endpoint's `deletedAt: null` filter never sees one.
+- **The demo route 404s in production.** Not in the spec text, but "dev-only page" plus "must not be reachable with real signed URLs" made hiding it from the deployed app the smaller reading.
+- **The subscriber's email was removed from the image watermark.** Required by D1's non-leakage constraint; the two Session 04/08 tests that asserted the email in the label were updated to assert the brand + code shape and the absence of the email/id instead.
+- **ARIA validation:** `eslint-plugin-jsx-a11y` caught one real finding on the new demo page (`img-redundant-alt`), fixed; zero remaining. The component uses `role="group"` + `aria-label`, an `aria-hidden` decorative overlay and a `role="status"` live region.
 
 **External Prerequisites:**
-- [ ] No new external accounts required
-- [ ] Storage provider from Session 03 must support signed URLs (Supabase Storage and R2 both do)
+- [x] No new external accounts required
+- [x] Storage provider supports signed URLs + `DeleteObject` (Supabase Storage S3 endpoint — already in use)
+- [ ] Generate `WATERMARK_TRACE_SECRET` (`openssl rand -hex 32`, ≥ 32 chars) for every deployed environment — **the API will not boot without it**
+- [ ] Generate `STORAGE_CLEANUP_CRON_SECRET` (`openssl rand -hex 32`) and store it as a GitHub Actions repository secret (alongside the existing `API_PUBLIC_URL`)
+
+---
+
+### Session 09.5 — Lei FELCA: Age Verification (CPF + Face ID) ⏳ Pending — **NEXT**
+**File:** `.claude/sessions/session-09.5.md` _(to be written)_  
+**Domain:** Lei 15.211/2025 compliance — CPF + facial age verification for subscribers before any 18+ content is served; KYC vendor abstraction (`IAgeVerificationProvider`), verification status on `User`, gate in `resolveAccess`/serve paths, ANPD-grade audit trail. **Hard deadline: 17/03/2026.**
+
+**External Prerequisites:**
+- [ ] Choose a KYC/liveness vendor with CPF validation and adult-platform acceptance (candidates to evaluate: idwall, unico, Serpro Datavalid for CPF; confirm adult-content policy before signing)
+- [ ] Vendor API credentials + webhook secret
 
 ---
 
@@ -538,6 +572,22 @@ _Session 07 — real-time messaging decisions:_
 
 - **The fan-out registry (`connections.ts`) is process-local by design, not by oversight.** A single MVP instance needs nothing more elaborate than an in-memory `Map<userId, Set<socket>>`. Horizontal scaling of the API would need a shared layer (Redis pub/sub or similar) so an event reaches a recipient connected to a *different* process — logged as an Open Item, deliberately not solved in this session. The service only depends on an injected `send(userId, event)` seam, so that swap stays in the wiring layer.
 
+_Session 09 — anti-leak & content protection decisions:_
+
+- **Video: Option B (client overlay + documented residual risk), not ffmpeg burn-in.** Per-viewer tracing on video needs a per-*view* transcode — a burn-in at upload would give a per-model mark, not a per-viewer one, so it does not even answer the question. A per-view transcode of a 500 MB file is minutes of CPU per serve, far outside anything a synchronous request can bound the way `GENERATION_TIMEOUT_MS` bounds a generation, and it would have to run somewhere: ffmpeg is a heavy native binary that does not fit a serverless-friendly, free-tier-first stack, and offloading it means a job queue, worker fleet and transcoded-output storage — a whole subsystem for one feature. Option B costs zero new dependencies, gives every video view a per-viewer code with the same audit trail as images, and is honest about what it does not do: the signed URL still points at the unmarked original for its 60 s TTL, and someone who fetches it directly gets that. That gap is written down in the service, the shared type, the component and here, rather than papered over. Revisit only if a real leak investigation shows the raw-URL path being used — at which point an async, off-request per-model burn-in (not per-viewer) is the realistic next step.
+
+- **The trace code is an HMAC, resolved only through the AuditLog.** A code found on a leaked screenshot must identify the viewer to *us* and to nobody else. Burning the email or user id (Session 04 did burn the email) leaks PII into the very file that leaked. HMAC-SHA256 under `WATERMARK_TRACE_SECRET` over `(entityId, viewerId, minute)` is opaque without the key, cheap (one synchronous digest, no round-trip, constant work whatever the inputs — no timing side-channel on serve history), and deterministic within a minute so a refresh does not spray distinct marks. The AuditLog row written per serve is the *only* lookup table; hence the key is required at boot in every environment with a 32-char floor — a short key makes offline brute force of a code feasible.
+
+- **`AuditLog` reused, no parallel table.** The forensic lookup (`metadata.traceCode = ?`) is a rare, manual, investigative query; every other "who did what" record in the codebase already lives in `AuditLog`, and the row shape (`actorId` = viewer, `entity`/`entityId` = what was served) needs nothing the model does not have. A dedicated table would earn its keep only if lookups become routine — then a JSON index on `metadata->>'traceCode'` is the first step, not a new model.
+
+- **The trace is composed into the label by the service; `ImageProcessor` is untouched.** The processor renders text; which text is a policy the service already owned. Keeping the interface stable meant the sharp binding, its interface and every test fake stayed as Session 04 left them.
+
+- **Storage cleanup: delete-then-null with a compare-and-set, keyset-paged.** Same ledger discipline as payouts: the object is deleted, then the row is *claimed* by nulling `storageKey` where it still equals the key just deleted. A crash between the two leaves a key pointing at nothing, which the next run deletes again (a no-op) and nulls; two overlapping runs cannot double-count because only one CAS matches. Nulling the key is also what makes "storageKey never exposed" true at rest and the re-run a fast no-op — purged rows are excluded by the query itself. Pages are bounded (100) and walked by `id > lastId` so a large backlog is many short queries, never one scan.
+
+- **`ProtectedMedia` is a deterrent and is labelled as one.** Right-click, drag and tab-switch protections raise the cost of casual capture and keep the trace code in frame; they cannot and do not claim to stop an OS screenshot, a recorder or a camera. The real controls stay server-side. The demo route ships with placeholder assets only and 404s in production.
+
+- **`@testing-library/react` + jsdom for the first web suite.** The component is entirely DOM behaviour (a prevented `contextmenu`, `visibilitychange`, `blur`/`focus`, `HTMLMediaElement.pause`) — meaningless in the API suite's `node` environment. jsdom is the lightest environment that implements those; RTL queries the DOM the way a user (and the jsx-a11y rules) perceive it, and is the React 18 standard (`react-test-renderer` is deprecated and cannot dispatch real DOM events). `esbuild.jsx: 'automatic'` in the Vitest config avoids a Vite React plugin for a test-only concern. Both are devDependencies of `apps/web` only.
+
 _Post-Session 05 — scope correction:_
 
 - **PPV was scaffolded in Session 04 but is out of product scope (see original brief) — removed in a post-Session-05 correction; access to PREMIUM content is subscription-only.** `Content.ppvPriceCents` dropped (migration `20260831025136_remove_ppv`), the `ppv_purchase` grant reason retired, and `resolveAccess` now admits PREMIUM on `subscription_premium` alone (owner/admin unchanged).
@@ -577,6 +627,11 @@ creator-platform/
 │   │   ├── src/app/layout.tsx
 │   │   ├── src/app/page.tsx
 │   │   ├── src/app/wallet/page.tsx  # balance + credit-pack checkout (Session 05)
+│   │   ├── src/app/dev/protected-media/page.tsx  # ProtectedMedia demo, placeholders only, 404 in prod (Session 09)
+│   │   ├── src/components/
+│   │   │   ├── ProtectedMedia.tsx       # client-side capture deterrents + trace overlay (Session 09)
+│   │   │   └── ProtectedMedia.test.tsx  # 7 tests (jsdom + RTL)
+│   │   ├── vitest.config.ts             # jsdom env, esbuild jsx automatic (Session 09)
 │   │   ├── next.config.mjs
 │   │   ├── tsconfig.json
 │   │   └── .env.example
@@ -613,12 +668,18 @@ creator-platform/
 │       │   │   │   ├── provider.interface.ts + provider.factory.ts
 │       │   │   │   ├── payments.routes.ts / .service.ts / .schema.ts
 │       │   │   │   └── payments.test.ts     # 41 tests
-│       │   │   └── payouts/                 # money OUT (Session 06)
-│       │   │       ├── adapters/            # paxum, mock, http
-│       │   │       ├── provider.interface.ts + provider.factory.ts
-│       │   │       ├── revenue.ts           # computeRevenueSplit (80/20)
-│       │   │       ├── payouts.routes.ts / .service.ts / .schema.ts
-│       │   │       └── payouts.test.ts      # 67 tests
+│       │   │   ├── payouts/                 # money OUT (Session 06)
+│       │   │   │   ├── adapters/            # paxum, mock, http
+│       │   │   │   ├── provider.interface.ts + provider.factory.ts
+│       │   │   │   ├── revenue.ts           # computeRevenueSplit (80/20)
+│       │   │   │   ├── payouts.routes.ts / .service.ts / .schema.ts
+│       │   │   │   └── payouts.test.ts      # 67 tests
+│       │   │   ├── protection/              # anti-leak (Session 09)
+│       │   │   │   ├── trace.ts             # computeTraceCode (HMAC→base32) + createTraceRecorder (AuditLog)
+│       │   │   │   └── protection.test.ts   # 15 tests (D1/D2 acceptance + non-leakage)
+│       │   │   └── storage-cleanup/         # orphan purge sweep (Session 09)
+│       │   │       ├── storage-cleanup.routes.ts / .service.ts
+│       │   │       └── storage-cleanup.test.ts  # 7 tests
 │       │   ├── subscriptions/               # lifecycle (Session 06.5)
 │       │   │   ├── subscriptions.routes.ts / .service.ts / .schema.ts
 │       │   │   └── subscriptions.test.ts    # 21 tests
@@ -628,7 +689,7 @@ creator-platform/
 │       │       └── fastify-jwt.d.ts
 │       ├── prisma/
 │       │   ├── schema.prisma        # User, ModelProfile (+payoutEmail), Content, payments (+cancelAtPeriodEnd) + Payout models + enums
-│       │   ├── migrations/          # …_add_user_model, …_add_model_profile, …_add_content_management, …_add_payments, …_remove_ppv, …_add_payouts, …_add_payout_email, …_add_subscription_lifecycle
+│       │   ├── migrations/          # …_add_user_model, …_add_model_profile, …_add_content_management, …_add_payments, …_remove_ppv, …_add_payouts, …_add_payout_email, …_add_subscription_lifecycle, …_add_messaging, …_add_generation_jobs, …_nullable_content_storage_key
 │       │   └── generated/           # Prisma client output (gitignored)
 │       ├── scripts/
 │       │   └── postinstall.mjs
@@ -642,7 +703,8 @@ creator-platform/
 ├── .github/workflows/
 │   ├── ci.yml
 │   ├── weekly-payout.yml            # Mon 12:00 UTC → POST /api/payouts/run
-│   └── subscription-renewals.yml    # daily 06:00 UTC → POST /api/subscriptions/renewals/run
+│   ├── subscription-renewals.yml    # daily 06:00 UTC → POST /api/subscriptions/renewals/run
+│   └── storage-cleanup.yml          # daily 07:00 UTC → POST /api/admin/storage/cleanup/run
 ├── .claude/sessions/
 ├── tsconfig.base.json
 ├── turbo.json
@@ -706,6 +768,8 @@ All `.env*` files are gitignored; examples contain placeholders only.
 | `AI_PROVIDER_API_KEY` | api | 08 | Replicate token; **required at boot** when `AI_PROVIDER=replicate` |
 | `GENERATION_TIMEOUT_MS` | api | 08 | Bound on the synchronous provider poll before failing closed (default `90000`) |
 | `GENERATION_IMAGE_RETENTION_DAYS` | api | 08 | Days a completed generation stays servable before `expiresAt` (default `30`) |
+| `WATERMARK_TRACE_SECRET` | api | 09 | HMAC key for the per-viewer forensic trace code; **required in every environment, min 32 chars** (boot fails otherwise) |
+| `STORAGE_CLEANUP_CRON_SECRET` | api | 09 | Shared secret for `POST /api/admin/storage/cleanup/run` (timing-safe compare); mirrored as a GitHub Actions repo secret |
 | `NEXT_PUBLIC_APP_URL` / `NEXT_PUBLIC_API_URL` | web | — | Public URLs for the web app |
 | `NEXT_PUBLIC_DEFAULT_LOCALE` | web | 10 | Default UI locale (`pt-BR` \| `en`) |
 
@@ -717,9 +781,9 @@ All `.env*` files are gitignored; examples contain placeholders only.
 - No frontend auth UI yet — login/register pages arrive in a future session
 - Free-tier first: all tooling choices must have a usable free tier at MVP
 - Architecture must allow swapping to paid/robust tiers without a major refactor
-- **Video watermarking out of scope** (Session 04) — no ffmpeg/ffprobe; videos are served via a 60s signed URL with no server-side watermark. Harden in Session 09.
+- ~~**Video watermarking out of scope**~~ — **addressed in Session 09 as Option B**: `/serve` for VIDEO returns a per-viewer `traceCode` (audited like images) that the `ProtectedMedia` player overlays. **Residual risk, accepted and documented:** the signed URL still yields the unmarked original to anyone who fetches it directly within its 60 s TTL. Server-side burn-in (ffmpeg, async, per-model) remains a future option if an investigation shows that path being used.
 - **Content uploads buffer the full file into memory before storage write** (Session 04) — acceptable at MVP; true streaming needs the S3 multipart upload API (deferred).
-- **Soft-deleted content objects are left in storage** (Session 04) — a cleanup job to purge `deletedAt` rows' objects is deferred (Session 09/12 candidate).
+- ~~**Soft-deleted content objects are left in storage**~~ — **resolved in Session 09.** The daily `POST /api/admin/storage/cleanup/run` sweep deletes the object and nulls `Content.storageKey` (migration `20260912120000_nullable_content_storage_key`).
 - **Locked-teaser listing deferred** (Session 04) — the list endpoint hides inaccessible gated content rather than returning it with a null thumbnail; revisit if the UI wants upsell teasers.
 - ~~**Session 05 migration not yet applied**~~ — **resolved in Session 06.** The Supabase host was reachable again; `npx prisma migrate deploy` applied `20260830120000_add_payments`, `20260831025136_remove_ppv` and `20260901120000_add_payouts`. `prisma migrate status` reports all 6 migrations applied.
 - **Provider request/response shapes need live verification** (Session 05) — the Woovi and NOWPayments adapters were written against published API docs and exercised only against nock-mocked HTTP, because neither merchant account is approved yet. Re-verify field names (`charge.brCode`, `charge.transactionID`, `pay_address`, `pay_amount`, the `x-webhook-signature` / `x-nowpayments-sig` schemes) against a live sandbox charge before going to production.
@@ -728,7 +792,7 @@ All `.env*` files are gitignored; examples contain placeholders only.
 - **Payout earnings are summed in minor units without FX conversion** (Session 06) — the balance query sums `modelShareCents` across currencies, and a claim whose rows disagree falls back to `PAYOUT_CURRENCY`. Harmless while PIX/BRL dominates; a model earning in both BRL (PIX) and USD (crypto) needs per-currency payouts and an FX policy. Candidate: Session 11 alongside the admin dashboard.
 - **Credit-pack revenue is still not shared with models** (Session 06, by design) — `GenerationJob.modelId` now exists (Session 08), so the prerequisite for attributing credit spend to a model is in place, but the payout run itself still only sums `PaymentTransaction.modelShareCents` and has no path from a `GenerationJob` to a model's balance. Extending payouts to cover credit spend remains open — candidate for Session 11.
 - **`ReplicateAdapter` wire shapes need live verification** (Session 08) — written against Replicate's publicly documented predictions API and the `tencentarc/photomaker` model page, exercised only against `nock`-mocked HTTP because no Replicate account is approved yet. Re-verify the pinned version hash, input field names, auth header, and the polling/cancellation contract against a live prediction before production — same treatment as the Session 05/06 payment/payout providers.
-- **No cleanup job for expired generated images** (Session 08) — past `expiresAt` the API treats the image as gone (404), but the underlying storage object is not deleted, same deferred-cleanup pattern as Session 04's soft-deleted content. Candidate for the same future job as the `Content` cleanup (Session 09/12).
+- ~~**No cleanup job for expired generated images**~~ — **resolved in Session 09.** The same sweep purges `COMPLETED` `GenerationJob` rows past `expiresAt` and nulls their `storageKey`; the row stays so the gallery still lists the job as expired.
 - **A crash mid-generation leaves a stale `PENDING` `GenerationJob`** (Session 08) — the one-in-flight-per-subscriber constraint means a process crash between the credit debit and the provider response leaves that subscriber locked out (and the credits already spent) until the row is manually resolved. No sweeper reconciles this yet. Fold into the `Payout`/renewal reconciliation job already flagged for Session 11/12.
 - **No `Payout` reconciliation job** (Session 06) — a `PROCESSING` payout whose IPN never arrives stays `PROCESSING` forever; there is no sweeper that re-queries Paxum for stale batches. Add one when real volume exists (Session 11/12 candidate).
 - ~~**Subscription renewal and cancellation are not implemented**~~ — **resolved in Session 06.5.** A daily cron-triggered sweep (`POST /api/subscriptions/renewals/run`) issues a renewal charge + reminder email before `currentPeriodEnd`, walks lapsed non-payers `ACTIVE → PAST_DUE → EXPIRED` across a configurable grace window, and lands opted-out subscribers on `CANCELED`. `Subscription.cancelAtPeriodEnd` (migration `20260902120000_add_subscription_lifecycle`, applied) backs self-service `POST /model/:modelId/cancel` and `/resume`.
@@ -739,7 +803,12 @@ All `.env*` files are gitignored; examples contain placeholders only.
 - **Woovi adult content policy** — Woovi/OpenPix é um gateway PIX brasileiro regulado. Antes de ir ao ar em produção com conteúdo explícito adulto, confirmar com o suporte deles (suporte@woovi.com) se aceitam plataformas adult 18+. PIX em si não tem restrição de conteúdo (é infraestrutura do Banco Central), mas o gateway pode ter política própria.
 - **CCBill deferred to post-MVP** — $1,450/yr Visa+MC registration fees make card processing financially unviable at MVP stage. CCBill slot is scaffolded as `MockPaymentProvider`. Activate when monthly revenue covers the annual fee.
 - **NOWPayments crypto-to-fiat conversion** — NOWPayments settles in cryptocurrency. To receive BRL/USD fiat, platform must maintain exchange accounts (Bybit/OKX/Binance) and execute regular USDT→fiat withdrawals. This is an operational step outside the codebase.
-- **Lei FELCA compliance (Brazil)** — Lei 15.211/2025 requires adult platforms to implement CPF + Face ID age verification by 17/03/2026. Penalties: up to R$50M or 10% of annual Brazil revenue. Must be scoped into a future session (candidate: Session 09 or a new Session 9.5). ANPD is the enforcement authority.
+- **Lei FELCA compliance (Brazil)** — Lei 15.211/2025 requires adult platforms to implement CPF + Face ID age verification by 17/03/2026. Penalties: up to R$50M or 10% of annual Brazil revenue. **Scoped as Session 09.5 — the next session** (deliberately kept out of Session 09: distinct KYC vendor integration with a hard legal deadline). ANPD is the enforcement authority.
+- **Forensic trace lookup is an unindexed JSON query** (Session 09) — resolving a leaked code means `AuditLog WHERE metadata->>'traceCode' = ?`, a sequential scan over the audit table. Fine for the rare manual investigation at MVP; add an expression index (or a dedicated column) when the table or the investigation cadence grows. Candidate: Session 12 index review.
+- **One `AuditLog` row per image/video serve** (Session 09) — the trace trail grows with view volume, not with money events. Harmless at MVP; a retention policy for `content.served` / `generation.image_served` rows (e.g. 12 months) belongs in the same reconciliation/cleanup job family flagged for Session 11/12.
+- **`ProtectedMedia` is not wired into a real viewer yet** (Session 09) — there is no content-viewing page; the component is exercised only by the `/dev/protected-media` demo (placeholders, 404 in prod) and its tests. The future subscriber UI must wrap every `<img>`/`<video>` served from `/serve` or `/generations/:id/image` in it and pass the `traceCode` (video: from the JSON; image: a future header or the code is simply already burned in).
+- **The trace code is per-minute, so a code names a viewer, not a single request** (Session 09, by design) — two serves by the same viewer of the same item within one minute share a code and both audit rows; the lookup returns both, which is the intended de-duplication, but an investigation should read *all* rows for a code, not the first.
+- **`turbo run lint` runs nothing** (pre-existing, noted in Session 09) — no package defines a `lint` script; the real gate is root `pnpm lint` (`eslint .`), which CI runs. `pnpm format:check` also flags several pre-existing files; only Session 09's own files were formatted, on purpose.
 - **Paxum → Woovi/NOWPayments wire** — model payouts via Paxum require the platform to accumulate earnings from Woovi and NOWPayments, then fund the Paxum business account. Still a manual treasury step outside the codebase (Session 06 automates the *distribution*, not the *funding*); document the SOP before the first live run.
 - **MEI faturamento limit** — MEI CNPJ 67.735.318/0001-91 has R$130k/year revenue cap. When platform revenue approaches this threshold, migrate to ME (Microempresa) with a contador. This unlocks higher volume and formal payroll if needed.
 - **Telegram Stars** — optional secondary channel for microtransactions on Telegram bots. ~32% effective fee on mobile purchases. 21-day withdrawal hold. iOS restrictions on adult content via Stars. Not a primary payment channel — integrate only if there is an active Telegram community.
@@ -748,4 +817,4 @@ All `.env*` files are gitignored; examples contain placeholders only.
 
 ---
 
-## Last Updated — Session 08 complete: AI image personalization (`GenerationJob` model, `IAIProvider`/`ReplicateAdapter`(`tencentarc/photomaker`)/`MockAIProvider` following the Session 05/06 provider-abstraction pattern, hidden likeness anchor built server-side from `ModelProfile`+`ReferenceImage` with a dedicated non-leakage test, content-safety gate rejecting minor-indicating and real-person-targeting prompts in EN/PT-BR before any credit is touched, synchronous generation with automatic credit refund on provider failure, one-in-flight-per-subscriber enforced by a partial unique index, on-the-fly watermarking reusing Session 04's `ImageProcessor`, 30-day image expiration). 309 tests green (75 new, zero regressions). Migration `20260911120000_add_generation_jobs` generated **and applied** — all 10 migrations now live on Supabase. Next: Session 09 (anti-leak & content protection). Replicate wire format needs live verification once the account is approved — logged as an Open Item, not a blocker [2026-09-11]
+## Last Updated — Session 09 complete: anti-leak & content protection. Per-viewer forensic trace codes (`modules/protection/trace.ts`: HMAC-SHA256 → 8-char base32, resolvable only through a per-serve `AuditLog` row; the subscriber's email is no longer in any watermark) wired into both image-serving endpoints and — as **Option B**, justified in Architecture Decisions — returned as `traceCode` for video, whose raw signed URL stays unmarked (documented residual risk). `ProtectedMedia` React component (context-menu/drag blocked, blur + pause on tab hide/window blur, persistent trace overlay; explicitly deterrent-only) + `/dev/protected-media` demo (placeholders, 404 in prod) + the web package's first Vitest suite (jsdom + RTL). Daily `POST /api/admin/storage/cleanup/run` sweep purges soft-deleted `Content` and expired `GenerationJob` objects, then nulls `storageKey` (delete-then-null CAS, keyset pages of 100, counts-only summary) — resolving the Session 04 and Session 08 orphaned-object Open Items; migration `20260912120000_nullable_content_storage_key` generated **and applied** (11 live). `WATERMARK_TRACE_SECRET` (required everywhere, ≥ 32 chars) and `STORAGE_CLEANUP_CRON_SECRET` added to `env.ts`. 331 API tests (22 new) + 7 web tests, zero regressions; `pnpm turbo run typecheck lint test build` and root `pnpm lint` green. **Next: Session 09.5 (Lei FELCA — CPF + Face ID age verification, deadline 17/03/2026).** [2026-09-12]
