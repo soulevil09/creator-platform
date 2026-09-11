@@ -45,3 +45,11 @@ process.env.PAYOUT_CRON_SECRET ??= 'test-payout-cron-secret';
 // cron secret: a deterministic test value that the suite compares against, never
 // echoed into a response.
 process.env.SUBSCRIPTION_RENEWAL_CRON_SECRET ??= 'test-renewal-cron-secret';
+
+// AI provider (Session 08). Same posture again: the Replicate adapter is
+// exercised only through nock (against api.replicate.com itself, intercepted —
+// `disableNetConnect()` makes any escape a hard failure), and the integration
+// suite injects the mock adapter. The token is a deterministic fake that
+// satisfies env.ts's "required when AI_PROVIDER=replicate" check.
+process.env.AI_PROVIDER ??= 'replicate';
+process.env.AI_PROVIDER_API_KEY ??= 'r8_test_token';

@@ -45,9 +45,22 @@ export interface FakeUser {
 export interface FakeProfile {
   id: string;
   userId: string;
+  displayName: string;
+  /** Session 03 likeness opt-in; Session 08 reads it live on every generation. */
+  aiConsent: boolean;
   /** Paxum destination address; null until the model sets one. UNIQUE. */
   payoutEmail: string | null;
   updatedAt: Date;
+}
+
+export interface FakeReferenceImage {
+  id: string;
+  modelProfileId: string;
+  /** Persisted, never serialized. */
+  storageKey: string;
+  mimeType: string;
+  sizeBytes: number;
+  createdAt: Date;
 }
 
 export interface FakeContent {
@@ -148,6 +161,26 @@ export interface FakeAudit {
   createdAt: Date;
 }
 
+export type FakeGenerationStatus = 'PENDING' | 'COMPLETED' | 'FAILED';
+
+export interface FakeGenerationJob {
+  id: string;
+  subscriberId: string;
+  modelId: string;
+  mode: 'PRESET' | 'CUSTOM';
+  presetId: string | null;
+  userPrompt: string | null;
+  creditsCost: number;
+  status: FakeGenerationStatus;
+  /** Persisted, never serialized — the suite asserts it never leaves. */
+  storageKey: string | null;
+  providerJobId: string | null;
+  errorMessage: string | null;
+  expiresAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 export interface FakeConversation {
   id: string;
   subscriberId: string;
@@ -215,6 +248,8 @@ export function createFakePrisma() {
   const auditLogs: FakeAudit[] = [];
   const conversations: FakeConversation[] = [];
   const messages: FakeMessage[] = [];
+  const referenceImages: FakeReferenceImage[] = [];
+  const generationJobs: FakeGenerationJob[] = [];
   /**
    * Per-delegate-method call counter. The conversation list must stay O(1) in
    * queries however many conversations a user has, and the only honest way to
@@ -305,6 +340,21 @@ export function createFakePrisma() {
   const messageMatches = (m: FakeMessage, where: Where): boolean => {
     for (const [key, condition] of Object.entries(where)) {
       const value = (m as unknown as Record<string, unknown>)[key];
+      if (condition !== null && typeof condition === 'object' && !(condition instanceof Date)) {
+        const op = condition as { in?: unknown[]; not?: unknown };
+        if (Array.isArray(op.in) && !op.in.includes(value)) return false;
+        if ('not' in op && value === op.not) return false;
+        continue;
+      }
+      if (value !== condition) return false;
+    }
+    return true;
+  };
+
+  /** Scalar equality plus `{ in }` / `{ not }` — the shapes the generation module issues. */
+  const jobMatches = (job: FakeGenerationJob, where: Where): boolean => {
+    for (const [key, condition] of Object.entries(where)) {
+      const value = (job as unknown as Record<string, unknown>)[key];
       if (condition !== null && typeof condition === 'object' && !(condition instanceof Date)) {
         const op = condition as { in?: unknown[]; not?: unknown };
         if (Array.isArray(op.in) && !op.in.includes(value)) return false;
@@ -920,6 +970,110 @@ export function createFakePrisma() {
       },
     },
 
+    // ── Onboarding (Session 03) — only the read the generation module needs ──
+    referenceImage: {
+      findMany: async ({ where }: { where: Where; orderBy?: unknown }) => {
+        track('referenceImage.findMany');
+        return referenceImages
+          .filter((img) => where.modelProfileId === undefined || img.modelProfileId === where.modelProfileId)
+          .slice()
+          .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+      },
+    },
+
+    // ── AI generation (Session 08) ───────────────────────────────────────────
+    generationJob: {
+      create: async ({ data }: { data: Partial<FakeGenerationJob> & { subscriberId: string } }) => {
+        track('generationJob.create');
+        // The partial unique index from the migration: one PENDING job per
+        // subscriber. Enforced here exactly as Postgres would, so the service's
+        // P2002 → 429 mapping is exercised, not assumed.
+        const status = data.status ?? 'PENDING';
+        if (
+          status === 'PENDING' &&
+          generationJobs.some((j) => j.subscriberId === data.subscriberId && j.status === 'PENDING')
+        ) {
+          throw new FakeUniqueConstraintError('GenerationJob_one_pending_per_subscriber');
+        }
+        const now = new Date(Date.now() + ++seq);
+        const row: FakeGenerationJob = {
+          modelId: '',
+          mode: 'PRESET',
+          presetId: null,
+          userPrompt: null,
+          creditsCost: 0,
+          storageKey: null,
+          providerJobId: null,
+          errorMessage: null,
+          expiresAt: null,
+          ...data,
+          id: data.id ?? nextId('gen'),
+          status,
+          createdAt: now,
+          updatedAt: now,
+        };
+        generationJobs.push(row);
+        return row;
+      },
+      findUnique: async ({ where }: { where: { id: string } }) => {
+        track('generationJob.findUnique');
+        return generationJobs.find((j) => j.id === where.id) ?? null;
+      },
+      findFirst: async ({ where }: { where: Where }) => {
+        track('generationJob.findFirst');
+        return generationJobs.find((j) => jobMatches(j, where)) ?? null;
+      },
+      /** The cursor-paginated gallery read over `(createdAt DESC, id DESC)`. */
+      findMany: async ({
+        where,
+        orderBy,
+        take,
+        cursor,
+        skip = 0,
+      }: {
+        where: Where;
+        orderBy?: Array<Record<string, 'asc' | 'desc'>>;
+        take?: number;
+        cursor?: { id: string };
+        skip?: number;
+      }) => {
+        track('generationJob.findMany');
+        let rows = generationJobs.filter((j) => jobMatches(j, where));
+        for (const clause of [...(orderBy ?? [])].reverse()) {
+          const [field, dir] = Object.entries(clause)[0];
+          const sign = dir === 'asc' ? 1 : -1;
+          rows = [...rows].sort((a, b) => {
+            const av = (a as unknown as Record<string, unknown>)[field];
+            const bv = (b as unknown as Record<string, unknown>)[field];
+            if (av instanceof Date && bv instanceof Date) {
+              return (av.getTime() - bv.getTime()) * sign;
+            }
+            return String(av).localeCompare(String(bv)) * sign;
+          });
+        }
+        if (cursor) {
+          const at = rows.findIndex((j) => j.id === cursor.id);
+          rows = at === -1 ? [] : rows.slice(at + skip);
+        }
+        return take === undefined ? rows : rows.slice(0, take);
+      },
+      update: async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
+        track('generationJob.update');
+        const row = generationJobs.find((j) => j.id === where.id);
+        if (!row) throw new Error('record not found');
+        Object.assign(row, data, { updatedAt: new Date() });
+        return row;
+      },
+      updateMany: async ({ where, data }: { where: Where; data: Record<string, unknown> }) => {
+        track('generationJob.updateMany');
+        // Conditional by construction: the refund path's `where` names
+        // `status: 'PENDING'`, so a second failure pass matches zero rows.
+        const matched = generationJobs.filter((j) => jobMatches(j, where));
+        for (const row of matched) Object.assign(row, data, { updatedAt: new Date() });
+        return { count: matched.length };
+      },
+    },
+
     /** Interactive transaction: runs the callback against this same client. */
     $transaction: async <T>(fn: (tx: unknown) => Promise<T>): Promise<T> => fn(client),
 
@@ -935,6 +1089,8 @@ export function createFakePrisma() {
     __auditLogs: auditLogs,
     __conversations: conversations,
     __messages: messages,
+    __referenceImages: referenceImages,
+    __generationJobs: generationJobs,
     /** Per-delegate call counts, for the "no N+1" assertions. */
     __calls: calls,
     __resetCalls: () => {
@@ -955,14 +1111,68 @@ export function createFakeEmailer(): Emailer {
 }
 
 /** Seed a ModelProfile so a model can be subscribed to (and, optionally, paid). */
-export function seedProfile(prisma: FakePrisma, userId: string, payoutEmail?: string): FakeProfile {
+export function seedProfile(
+  prisma: FakePrisma,
+  userId: string,
+  payoutEmail?: string,
+  overrides: Partial<Pick<FakeProfile, 'displayName' | 'aiConsent'>> = {},
+): FakeProfile {
   const row: FakeProfile = {
     id: `mp_${userId}`,
     userId,
+    displayName: `Model ${userId}`,
+    aiConsent: false,
     payoutEmail: payoutEmail ?? null,
     updatedAt: new Date(),
+    ...overrides,
   };
   prisma.__profiles.push(row);
+  return row;
+}
+
+/** Seed a ReferenceImage on a profile — what a generation anchors on. */
+export function seedReferenceImage(
+  prisma: FakePrisma,
+  modelProfileId: string,
+  overrides: Partial<FakeReferenceImage> = {},
+): FakeReferenceImage {
+  const n = prisma.__referenceImages.length + 1;
+  const row: FakeReferenceImage = {
+    id: `ref_seed_${n}`,
+    modelProfileId,
+    storageKey: `reference-images/${modelProfileId}/seed_${n}.jpg`,
+    mimeType: 'image/jpeg',
+    sizeBytes: 1024,
+    createdAt: new Date(Date.now() + n * 1000),
+    ...overrides,
+  };
+  prisma.__referenceImages.push(row);
+  return row;
+}
+
+/** Seed a GenerationJob directly, for gallery/detail/expiry tests. */
+export function seedGenerationJob(
+  prisma: FakePrisma,
+  overrides: Partial<FakeGenerationJob> & { subscriberId: string; modelId: string },
+): FakeGenerationJob {
+  const n = prisma.__generationJobs.length + 1;
+  const now = new Date(Date.now() + n * 1000);
+  const row: FakeGenerationJob = {
+    id: `gen_seed_${n}`,
+    mode: 'PRESET',
+    presetId: 'hair_long_blonde',
+    userPrompt: 'Long blonde hair',
+    creditsCost: 10,
+    status: 'COMPLETED',
+    storageKey: `generations/${overrides.subscriberId}/seed_${n}.png`,
+    providerJobId: `pred_seed_${n}`,
+    errorMessage: null,
+    expiresAt: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000),
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  };
+  prisma.__generationJobs.push(row);
   return row;
 }
 

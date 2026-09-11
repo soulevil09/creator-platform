@@ -45,6 +45,13 @@ import { createMessagingService } from './modules/messaging/messaging.service.js
 import messagingRoutes from './modules/messaging/messaging.routes.js';
 import messagingWsRoutes from './modules/messaging/messaging.ws.js';
 import { createConnectionRegistry } from './modules/messaging/connections.js';
+import { createGenerationService } from './modules/generation/generation.service.js';
+import generationRoutes from './modules/generation/generation.routes.js';
+import {
+  assertAIProviderConfigured,
+  getAIProvider,
+} from './modules/generation/provider.factory.js';
+import type { IAIProvider } from './modules/generation/provider.interface.js';
 
 /** Max reference-image upload size, shared by the multipart limit (10 MB). */
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
@@ -64,6 +71,8 @@ export interface BuildServerOptions {
   getPaymentProvider?: (channel: PaymentChannel) => IPaymentProvider;
   /** Override the payout-provider factory (tests inject a stub adapter). */
   getPayoutProvider?: () => IPayoutProvider;
+  /** Override the AI-provider factory (tests inject the mock or a stub adapter). */
+  getAIProvider?: () => IAIProvider;
 }
 
 export async function buildServer(opts: BuildServerOptions = {}) {
@@ -73,6 +82,7 @@ export async function buildServer(opts: BuildServerOptions = {}) {
   const images = opts.images ?? createSharpImageProcessor();
   const getProvider = opts.getPaymentProvider ?? getPaymentProvider;
   const getPayoutAdapter = opts.getPayoutProvider ?? getPayoutProvider;
+  const getAIAdapter = opts.getAIProvider ?? getAIProvider;
 
   // Fail fast: an unknown PAYMENT_PROVIDER_* value must stop the process here,
   // not surface later as a failed checkout in production.
@@ -83,6 +93,11 @@ export async function buildServer(opts: BuildServerOptions = {}) {
   // that quietly does nothing.
   if (!opts.getPayoutProvider) {
     assertPayoutProviderConfigured();
+  }
+  // And for AI_PROVIDER — a typo must not surface as a 502 after a
+  // subscriber's credits were debited.
+  if (!opts.getAIProvider) {
+    assertAIProviderConfigured();
   }
 
   // Message bodies must never reach a log line in plaintext (Session 07): this
@@ -227,6 +242,27 @@ export async function buildServer(opts: BuildServerOptions = {}) {
     payoutCurrency: env.PAYOUT_CURRENCY,
   });
   await app.register(payoutRoutes, { prefix: '/api/payouts', service: payoutsService });
+
+  // ── AI image personalization (Session 08) ────────────────────────────────
+  // Spends credits through Session 05's wallet (never a provider call of its
+  // own), stores raw images through Session 03's storage client, and
+  // watermarks on serve through Session 04's processor. `app.log` is handed in
+  // so the module logs through the server's logger — and so the suite can
+  // spy on it to prove the anchor prompt never reaches a log line.
+  const generationService = createGenerationService({
+    prisma,
+    storage,
+    images,
+    bucket: env.STORAGE_BUCKET,
+    wallet: walletService,
+    getProvider: getAIAdapter,
+    retentionDays: env.GENERATION_IMAGE_RETENTION_DAYS,
+    logger: app.log,
+  });
+  await app.register(generationRoutes, {
+    prefix: '/api/generations',
+    service: generationService,
+  });
 
   return app;
 }

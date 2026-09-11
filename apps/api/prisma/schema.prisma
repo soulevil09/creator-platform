@@ -32,6 +32,11 @@
 // a single image/video attachment). Attachment object keys are persisted but
 // NEVER serialized — the same rule Content.storageKey and
 // ReferenceImage.storageKey already follow.
+// Session 08 adds AI image personalization: GenerationJob records one credit
+// spend → one generated image of one consenting model. `modelId` is required
+// on every row precisely so a future session can extend revenue sharing to
+// credit spend without a data migration. The hidden likeness-anchor prompt is
+// never persisted; `userPrompt` holds only the subscriber-supplied text.
 // =============================================================================
 
 generator client {
@@ -87,6 +92,11 @@ model User {
   subscriberConversations Conversation[] @relation("SubscriberConversations")
   modelConversations      Conversation[] @relation("ModelConversations")
   sentMessages            Message[]      @relation("SentMessages")
+
+  // AI generation (Session 08) — jobs a subscriber requested, and jobs that
+  // used a model's likeness.
+  generationRequests  GenerationJob[] @relation("SubscriberGenerations")
+  likenessGenerations GenerationJob[] @relation("ModelGenerations")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -527,4 +537,71 @@ model Message {
   // DESC) and the unread-count groupBy, which filters the same leading column.
   @@index([conversationId, createdAt])
   @@index([senderId])
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// AI generation domain (Session 08)
+//
+// One `GenerationJob` per credit spend: a subscriber asks for a personalized
+// image of one consenting model, credits are debited, the provider is called
+// synchronously, and the row ends COMPLETED (image stored, expiry set) or
+// FAILED (credits refunded in the same transaction that records the failure).
+//
+// What is deliberately NOT here: the likeness-anchor prompt. It is assembled
+// per request from the model's profile + reference images, handed to the
+// provider, and discarded — never a column, never a log line, never a
+// response field. `userPrompt` carries only what the subscriber typed (or a
+// preset's human-readable label), so the audit trail records intent without
+// recording the platform's own prompt engineering.
+// ═══════════════════════════════════════════════════════════════════════════
+
+enum GenerationMode {
+  PRESET
+  CUSTOM
+}
+
+/// PENDING   — credits debited, provider call in flight (one per subscriber
+///             at a time; enforced by a partial unique index in the migration)
+/// COMPLETED — image stored; `storageKey` + `expiresAt` set
+/// FAILED    — provider/storage failure; credits refunded, `errorMessage` set
+enum GenerationStatus {
+  PENDING
+  COMPLETED
+  FAILED
+}
+
+// ─── GenerationJob ───────────────────────────────────────────────────────────
+// `modelId` is required, not nullable: it is the attribution a future
+// credit-spend revenue share depends on (CLAUDE.md Open Items), and a job with
+// no model is not a job this platform can produce. `storageKey` follows the
+// Content / Message rule — persisted, never serialized; the only way to the
+// bytes is GET /api/generations/:id/image, which watermarks on the fly.
+model GenerationJob {
+  id           String @id @default(cuid())
+  subscriberId String
+  subscriber   User   @relation("SubscriberGenerations", fields: [subscriberId], references: [id], onDelete: Cascade)
+  modelId      String
+  model        User   @relation("ModelGenerations", fields: [modelId], references: [id], onDelete: Cascade)
+
+  mode       GenerationMode
+  presetId   String? // PRESET only — catalog id from @creator-platform/shared
+  /// Subscriber-supplied text (CUSTOM) or the preset's label (PRESET).
+  /// NEVER the resolved anchor prompt.
+  userPrompt String?
+
+  creditsCost Int
+  status      GenerationStatus @default(PENDING)
+
+  storageKey    String? // S3 key, set on COMPLETED, never exposed externally
+  providerJobId String? // provider-side prediction id, audit/debug only
+  errorMessage  String? // FAILED only — short internal code, never the raw provider payload
+  expiresAt     DateTime? // COMPLETED only — image is unservable past this
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Gallery listing, newest first, scoped to the caller.
+  @@index([subscriberId, createdAt])
+  // Future revenue-share query path (unused today; cheap now vs. a migration later).
+  @@index([modelId])
 }

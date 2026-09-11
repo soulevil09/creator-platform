@@ -49,6 +49,24 @@ function integerInRange(name: string, fallback: number, min: number, max: number
   return value;
 }
 
+/**
+ * Required whenever `condition` holds, whatever the NODE_ENV. Used for the AI
+ * provider token: unlike the payment credentials it gates nothing money-related
+ * that a mock can stand in for in a test — but `AI_PROVIDER=replicate` with no
+ * token would fail at the first paid generation, after the subscriber's credits
+ * were debited, so it must crash at boot instead.
+ */
+function requiredWhen(name: string, condition: boolean, because: string): string {
+  const value = process.env[name] ?? '';
+  if (condition && value.trim() === '') {
+    throw new Error(
+      `[env] Missing required environment variable: ${name} (required because ${because}). ` +
+        `Set it in apps/api/.env (see apps/api/.env.example).`,
+    );
+  }
+  return value;
+}
+
 function required(name: string): string {
   const value = process.env[name];
   if (!value || value.trim() === '') {
@@ -61,6 +79,20 @@ function required(name: string): string {
 }
 
 const NODE_ENV = process.env.NODE_ENV ?? 'development';
+
+/** Adapter used when `AI_PROVIDER` is unset (mirrors the payments/payouts defaults). */
+const DEFAULT_AI_PROVIDER = 'replicate';
+
+/**
+ * 90 s: Replicate cold-boots a model container in roughly 30–60 s and a warm
+ * SDXL-class run takes 10–20 s, so this covers a cold start plus generation
+ * plus the output download with headroom, while still bounding how long one
+ * subscriber holds a connection open.
+ */
+const DEFAULT_GENERATION_TIMEOUT_MS = 90_000;
+
+/** 30 days — long enough to come back for the image, short enough to bound storage. */
+const DEFAULT_GENERATION_IMAGE_RETENTION_DAYS = 30;
 
 export const env = {
   NODE_ENV,
@@ -170,6 +202,41 @@ export const env = {
     DEFAULT_SUBSCRIPTION_GRACE_PERIOD_DAYS,
     0,
     28,
+  ),
+
+  // ─── AI generation (Session 08) ───────────────────────────────────────────
+  // `AI_PROVIDER` picks the adapter (`replicate` | `mock`) and is read (and
+  // validated) in modules/generation/provider.factory.ts, which crashes at boot
+  // on an unknown value rather than falling back.
+  //
+  // The Replicate token is required whenever the Replicate adapter is the one
+  // selected — in every environment, not only production. A missing token
+  // would otherwise surface as a 502 after a subscriber's credits were already
+  // debited (and then refunded), which is a worse failure than not booting.
+  AI_PROVIDER_API_KEY: requiredWhen(
+    'AI_PROVIDER_API_KEY',
+    (process.env.AI_PROVIDER ?? DEFAULT_AI_PROVIDER).trim().toLowerCase() === 'replicate',
+    'AI_PROVIDER=replicate',
+  ),
+
+  /**
+   * Wall-clock budget for one synchronous generation, provider call included.
+   * The request holds a connection open for this long at most; past it the
+   * prediction is cancelled, the job is FAILED and the credits are refunded.
+   */
+  GENERATION_TIMEOUT_MS: integerInRange(
+    'GENERATION_TIMEOUT_MS',
+    DEFAULT_GENERATION_TIMEOUT_MS,
+    1_000,
+    600_000,
+  ),
+
+  /** Days a completed image stays servable before `expiresAt` cuts it off. */
+  GENERATION_IMAGE_RETENTION_DAYS: integerInRange(
+    'GENERATION_IMAGE_RETENTION_DAYS',
+    DEFAULT_GENERATION_IMAGE_RETENTION_DAYS,
+    1,
+    365,
   ),
 
   // Tunables with safe defaults.

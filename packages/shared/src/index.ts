@@ -418,6 +418,98 @@ export type MessageNewEvent = {
 /** Every event pushed over /ws/messages. A union of one, for now. */
 export type MessagingSocketEvent = MessageNewEvent;
 
+// ─── AI generation (Session 08) ──────────────────────────────────────────────
+/**
+ * How a subscriber describes the image they want. `preset` picks an entry
+ * from `GENERATION_PRESETS`; `custom` is free text that goes through the
+ * content-safety gate. Lowercase wire form; the Prisma `GenerationMode` enum is
+ * the uppercase DB form, mapped at the persistence boundary (same convention
+ * as roles).
+ */
+export const GENERATION_MODES = ['preset', 'custom'] as const;
+export type GenerationMode = (typeof GENERATION_MODES)[number];
+
+/** Lifecycle of one `GenerationJob`. Mirrors the Prisma `GenerationStatus` enum. */
+export const GENERATION_STATUSES = ['PENDING', 'COMPLETED', 'FAILED'] as const;
+export type GenerationStatus = (typeof GENERATION_STATUSES)[number];
+
+/**
+ * One preset a subscriber can pick. Server-side catalog: the client sends an
+ * `id`, and the cost is always resolved from this table — a client-supplied
+ * cost, if sent, is ignored (same rule as `SUBSCRIPTION_PLANS` / `CREDIT_PACKS`).
+ * The prompt text behind each preset lives in the API only; it is not part of
+ * the catalog a browser downloads.
+ */
+export type GenerationPreset = {
+  id: string;
+  label: string;
+  creditsCost: number;
+};
+
+// `as const satisfies` keeps the ids as literal types (so the API's per-preset
+// prompt table can be keyed by them and typecheck fails when the two drift)
+// while still checking every entry against `GenerationPreset`.
+export const GENERATION_PRESETS = [
+  { id: 'hair_long_blonde', label: 'Long blonde hair', creditsCost: 10 },
+  { id: 'hair_short_dark', label: 'Short dark hair', creditsCost: 10 },
+  { id: 'outfit_red_dress', label: 'Red evening dress', creditsCost: 10 },
+  { id: 'outfit_black_lingerie', label: 'Black lingerie', creditsCost: 10 },
+  { id: 'pose_mirror_selfie', label: 'Mirror selfie', creditsCost: 10 },
+  { id: 'pose_lying_on_bed', label: 'Lying on a bed', creditsCost: 10 },
+  { id: 'scene_beach_sunset', label: 'Beach at sunset', creditsCost: 10 },
+  { id: 'scene_neon_city', label: 'Neon city at night', creditsCost: 10 },
+] as const satisfies readonly GenerationPreset[];
+
+export function findGenerationPreset(presetId: string): GenerationPreset | undefined {
+  return GENERATION_PRESETS.find((preset) => preset.id === presetId);
+}
+
+/**
+ * Credits one custom-prompt generation costs. Higher than a preset: free text
+ * costs the platform the safety gate plus a less predictable provider run.
+ */
+export const GENERATION_CUSTOM_PROMPT_COST = 25;
+
+/** POST /api/generations — a discriminated union on `mode`; no cost field exists. */
+export type CreateGenerationRequest =
+  | { modelId: string; mode: 'preset'; presetId: string }
+  | { modelId: string; mode: 'custom'; customPrompt: string };
+
+/**
+ * One job as surfaced by the gallery list. `imageUrl` is a short-lived signed
+ * URL, present only while the job is COMPLETED and unexpired; there is no
+ * storage key here by design (same rule as `Content.storageKey`).
+ */
+export type GenerationListItem = {
+  generationId: string;
+  modelId: string;
+  mode: GenerationMode;
+  presetId: string | null;
+  status: GenerationStatus;
+  creditsCost: number;
+  imageUrl: string | null;
+  /** Null until COMPLETED; past it the image is no longer servable. */
+  expiresAt: string | null;
+  createdAt: string;
+};
+
+/** GET /api/generations — newest first; `nextCursor` feeds back as `?before=`. */
+export type GenerationListResponse = {
+  generations: GenerationListItem[];
+  nextCursor: string | null;
+};
+
+/**
+ * GET /api/generations/:id. Adds the subscriber's own prompt text (or the
+ * preset label) — never the hidden anchor prompt, which is not stored at all.
+ */
+export type GenerationDetailResponse = GenerationListItem & {
+  userPrompt: string | null;
+};
+
+/** 201 body of POST /api/generations — the completed job. */
+export type CreateGenerationResponse = GenerationDetailResponse;
+
 // ─── App metadata ────────────────────────────────────────────────────────────
 export const APP_NAME = 'Creator Platform';
 
