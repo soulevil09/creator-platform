@@ -102,10 +102,18 @@ export type ContentListItem = {
   createdAt: string;
 };
 
-/** /serve response for videos (images stream raw watermarked bytes instead). */
+/**
+ * /serve response for videos (images stream raw watermarked bytes instead).
+ *
+ * `traceCode` (Session 09, Option B): the per-viewer forensic code the player
+ * overlays on the `<video>`. The file behind `signedUrl` is NOT watermarked —
+ * the overlay deters casual screen-recording only; a direct fetch of the URL
+ * within its TTL yields the unmarked original. Documented residual risk.
+ */
 export type ContentVideoServeResponse = {
   signedUrl: string;
   expiresIn: number;
+  traceCode: string;
 };
 
 // ─── Payments (Session 05) ───────────────────────────────────────────────────
@@ -290,6 +298,21 @@ export type SubscriptionRenewalRunSummary = {
   movedToPastDue: number;
   movedToExpired: number;
   movedToCanceled: number;
+};
+
+// ─── Anti-leak & content protection (Session 09) ─────────────────────────────
+/**
+ * POST /api/admin/storage/cleanup/run — aggregate only, same reasoning as the
+ * payout and renewal run summaries: the caller is a cron job holding a shared
+ * secret, and the body lands in a CI step summary. Never a storage key.
+ */
+export type StorageCleanupRunSummary = {
+  /** Objects deleted and their rows' `storageKey` nulled. */
+  deleted: number;
+  /** Rows another run claimed first (or already keyless when read). */
+  skipped: number;
+  /** Deletes the storage provider rejected; the key stays for the next run. */
+  failed: number;
 };
 
 // ─── Messaging (Session 07) ──────────────────────────────────────────────────

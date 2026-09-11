@@ -50,6 +50,7 @@ import type { PrismaClient } from '../../lib/prisma.js';
 import type { StorageClient } from '../../lib/storage.js';
 import type { ImageProcessor } from '../../lib/image.js';
 import { InsufficientCreditsError, type WalletService } from '../wallet/wallet.service.js';
+import { traceWatermarkLabel, type TraceRecorder } from '../protection/trace.js';
 import { buildAnchorPrompt } from './anchor.js';
 import { checkPromptSafety, hashPrompt } from './safety.js';
 import { presetPromptFor } from './presets.js';
@@ -64,8 +65,6 @@ import type { CreateGenerationInput } from './generation.schema.js';
 export const REFERENCE_IMAGE_URL_TTL = 300;
 /** Generated-image signed-URL TTL for list/detail — same 300 s as content thumbnails. */
 export const GENERATION_IMAGE_URL_TTL = 300;
-/** Platform label burned into the per-user watermark (matches the content module). */
-const WATERMARK_BRAND = 'CreatorPlatform';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -107,6 +106,8 @@ export interface GenerationServiceDeps {
   getProvider: () => IAIProvider;
   /** Days a completed image stays servable (from GENERATION_IMAGE_RETENTION_DAYS). */
   retentionDays: number;
+  /** Session 09: mints the per-viewer trace code and writes its AuditLog row. */
+  trace: TraceRecorder;
   logger?: GenerationLogger;
 }
 
@@ -193,6 +194,7 @@ export function createGenerationService({
   wallet,
   getProvider,
   retentionDays,
+  trace,
   logger = noopLogger,
 }: GenerationServiceDeps) {
   /**
@@ -492,6 +494,9 @@ export function createGenerationService({
      * The image bytes, watermarked on the fly with Session 04's processor —
      * the stored object is never watermarked, and the watermarked bytes are
      * per-requester so the route sends them with `Cache-Control: no-store`.
+     * The mark is the brand + a forensic trace code (Session 09), never the
+     * subscriber's email or id; the code resolves to them only through the
+     * AuditLog row `trace.issue` writes.
      */
     async serveImage(subscriberId: string, id: string): Promise<GenerationImageResult> {
       const row = await loadOwned(subscriberId, id);
@@ -499,11 +504,14 @@ export function createGenerationService({
         throw new GenerationError(404, 'generation_not_found');
       }
 
+      const { traceCode } = await trace.issue({
+        entity: 'GenerationJob',
+        entityId: row.id,
+        viewerId: subscriberId,
+      });
       const raw = await storage.getObject(bucket, row.storageKey);
-      const user = await prisma.user.findUnique({ where: { id: subscriberId } });
-      const label = `${WATERMARK_BRAND} • ${user?.email ?? subscriberId}`;
       const mimeType = mimeTypeForKey(row.storageKey);
-      const buffer = await images.watermark(raw, label, mimeType);
+      const buffer = await images.watermark(raw, traceWatermarkLabel(traceCode), mimeType);
       return { buffer, mimeType };
     },
   };

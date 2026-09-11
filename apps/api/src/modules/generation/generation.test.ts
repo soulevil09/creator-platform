@@ -1230,11 +1230,14 @@ describe('GET /api/generations/:id/image', () => {
     expect(res.rawPayload.toString()).toBe('WATERMARKED');
 
     expect(h.storage.getObject).toHaveBeenCalledWith('test-bucket', job.storageKey);
+    // Session 09: brand + opaque trace code, never the subscriber's email or id
+    // (the forensic properties are pinned in protection.test.ts).
     expect(h.images.watermark).toHaveBeenCalledWith(
       expect.any(Buffer),
-      'CreatorPlatform • sub@example.com',
+      expect.stringMatching(/^CreatorPlatform • [A-Z2-7]{8}$/),
       'image/png',
     );
+    expect(auditRows(h, 'generation.image_served')).toHaveLength(1);
     expect(res.body).not.toContain(job.storageKey!);
   });
 

@@ -62,6 +62,16 @@ interface FakeAccess {
   expiresAt: Date | null;
 }
 
+interface FakeAudit {
+  id: string;
+  actorId: string | null;
+  action: string;
+  entity: string;
+  entityId: string;
+  metadata: unknown;
+  createdAt: Date;
+}
+
 type Where = Record<string, unknown>;
 
 function createFakePrisma() {
@@ -69,6 +79,7 @@ function createFakePrisma() {
   const profiles: FakeProfile[] = [];
   const content: FakeContent[] = [];
   const accesses: FakeAccess[] = [];
+  const auditLogs: FakeAudit[] = [];
   let seq = 0;
 
   const matchUser = (u: FakeUser, where: Where) =>
@@ -213,10 +224,26 @@ function createFakePrisma() {
       },
     },
 
+    // Session 09: every serve writes the trace-code lookup row here.
+    auditLog: {
+      create: async ({ data }: { data: Partial<FakeAudit> }) => {
+        const row = {
+          actorId: null,
+          metadata: null,
+          ...data,
+          id: `log_${++seq}`,
+          createdAt: new Date(),
+        } as FakeAudit;
+        auditLogs.push(row);
+        return row;
+      },
+    },
+
     __users: users,
     __profiles: profiles,
     __content: content,
     __accesses: accesses,
+    __auditLogs: auditLogs,
   };
   return client;
 }
@@ -604,9 +631,14 @@ describe('GET /api/content/:contentId/serve', () => {
     expect(res.headers['cache-control']).toBe('no-store');
     expect(res.headers['content-type']).toContain('image/jpeg');
     expect(res.rawPayload.toString()).toContain(WATERMARK_MARKER);
-    // Watermark label carries the platform brand + the requester's email.
-    expect(res.rawPayload.toString()).toContain('sub@example.com');
+    // Session 09: the label is the brand + an opaque trace code — never the
+    // requester's email or id (the forensic tests live in protection.test.ts).
+    const body = res.rawPayload.toString();
+    expect(body).toMatch(/CreatorPlatform • [A-Z2-7]{8}$/);
+    expect(body).not.toContain('sub@example.com');
+    expect(body).not.toContain(subId);
     expect(images.watermark).toHaveBeenCalledOnce();
+    expect(prisma.__auditLogs.filter((l) => l.action === 'content.served')).toHaveLength(1);
     expect(prisma.__content.find((x) => x.id === c.id)!.viewCount).toBe(1);
   });
 

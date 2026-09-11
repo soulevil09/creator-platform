@@ -53,3 +53,9 @@ process.env.SUBSCRIPTION_RENEWAL_CRON_SECRET ??= 'test-renewal-cron-secret';
 // satisfies env.ts's "required when AI_PROVIDER=replicate" check.
 process.env.AI_PROVIDER ??= 'replicate';
 process.env.AI_PROVIDER_API_KEY ??= 'r8_test_token';
+
+// Anti-leak (Session 09). The trace secret is validated eagerly (min 32 chars)
+// like JWT_SECRET; the cleanup cron secret follows the payout/renewal ones. Both
+// are deterministic test values that never leave the suite.
+process.env.WATERMARK_TRACE_SECRET ??= 'test-watermark-trace-secret-at-least-32-chars!!';
+process.env.STORAGE_CLEANUP_CRON_SECRET ??= 'test-storage-cleanup-cron-secret';

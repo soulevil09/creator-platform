@@ -52,6 +52,9 @@ import {
   getAIProvider,
 } from './modules/generation/provider.factory.js';
 import type { IAIProvider } from './modules/generation/provider.interface.js';
+import { createTraceRecorder } from './modules/protection/trace.js';
+import { createStorageCleanupService } from './modules/storage-cleanup/storage-cleanup.service.js';
+import storageCleanupRoutes from './modules/storage-cleanup/storage-cleanup.routes.js';
 
 /** Max reference-image upload size, shared by the multipart limit (10 MB). */
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
@@ -173,11 +176,18 @@ export async function buildServer(opts: BuildServerOptions = {}) {
     service: onboardingService,
   });
 
+  // ── Anti-leak (Session 09) ────────────────────────────────────────────────
+  // One trace recorder for every image/video serve path. The content and
+  // generation modules both mint their per-viewer codes through it, so there
+  // is a single HMAC scheme and a single AuditLog shape to look a code up in.
+  const trace = createTraceRecorder({ prisma, secret: env.WATERMARK_TRACE_SECRET });
+
   const contentService = createContentService({
     prisma,
     storage,
     images,
     bucket: env.STORAGE_BUCKET,
+    trace,
   });
   await app.register(contentRoutes, {
     prefix: '/api/content',
@@ -257,11 +267,27 @@ export async function buildServer(opts: BuildServerOptions = {}) {
     wallet: walletService,
     getProvider: getAIAdapter,
     retentionDays: env.GENERATION_IMAGE_RETENTION_DAYS,
+    trace,
     logger: app.log,
   });
   await app.register(generationRoutes, {
     prefix: '/api/generations',
     service: generationService,
+  });
+
+  // ── Storage hygiene (Session 09) ──────────────────────────────────────────
+  // Daily cron-triggered sweep that purges the objects behind soft-deleted
+  // Content and expired GenerationJob rows — the two orphan sources Sessions
+  // 04 and 08 deferred. Same service-secret posture as the payout and renewal
+  // runs; no JWT, no user.
+  const storageCleanupService = createStorageCleanupService({
+    prisma,
+    storage,
+    bucket: env.STORAGE_BUCKET,
+  });
+  await app.register(storageCleanupRoutes, {
+    prefix: '/api/admin/storage',
+    service: storageCleanupService,
   });
 
   return app;

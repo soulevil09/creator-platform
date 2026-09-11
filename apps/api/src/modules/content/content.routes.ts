@@ -211,9 +211,13 @@ export default async function contentRoutes(
           role: request.user.role,
         });
         if (result.kind === 'video') {
-          return reply
-            .code(200)
-            .send({ signedUrl: result.signedUrl, expiresIn: result.expiresIn });
+          // Option B (Session 09): the player overlays `traceCode`; the URL
+          // itself points at the unmarked original for its 60 s TTL.
+          return reply.code(200).send({
+            signedUrl: result.signedUrl,
+            expiresIn: result.expiresIn,
+            traceCode: result.traceCode,
+          });
         }
         // Per-user watermarked bytes must never be cached.
         return reply

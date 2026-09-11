@@ -78,6 +78,23 @@ function required(name: string): string {
   return value;
 }
 
+/**
+ * `required`, plus a floor on length. Used for HMAC keys whose whole value is
+ * their entropy: a short `WATERMARK_TRACE_SECRET` would let a leaked trace
+ * code be brute-forced back to a (content, viewer) pair offline, defeating the
+ * "only the AuditLog can resolve a code" property Session 09 is built on.
+ */
+function requiredMinLength(name: string, minLength: number): string {
+  const value = required(name);
+  if (value.length < minLength) {
+    throw new Error(
+      `[env] ${name} must be at least ${minLength} characters long. ` +
+        `Generate one with: openssl rand -hex 32`,
+    );
+  }
+  return value;
+}
+
 const NODE_ENV = process.env.NODE_ENV ?? 'development';
 
 /** Adapter used when `AI_PROVIDER` is unset (mirrors the payments/payouts defaults). */
@@ -238,6 +255,25 @@ export const env = {
     1,
     365,
   ),
+
+  // ─── Anti-leak & content protection (Session 09) ─────────────────────────
+  /**
+   * HMAC key behind the per-viewer forensic trace code burned into every
+   * served image (and returned alongside every served video). Required in
+   * EVERY environment, exactly like JWT_SECRET: a serve path with no key would
+   * have to either skip the trace (an untraceable leak) or fall back to a
+   * hard-coded one (a forgeable trace), and both are worse than not booting.
+   * Min 32 chars — see `requiredMinLength`. Never logged, never echoed.
+   */
+  WATERMARK_TRACE_SECRET: requiredMinLength('WATERMARK_TRACE_SECRET', 32),
+
+  /**
+   * Shared secret for POST /api/admin/storage/cleanup/run, called by the daily
+   * GitHub Actions cron job — identical posture to PAYOUT_CRON_SECRET and
+   * SUBSCRIPTION_RENEWAL_CRON_SECRET: required in production so an empty value
+   * can never become an open endpoint, compared in constant time, never echoed.
+   */
+  STORAGE_CLEANUP_CRON_SECRET: requiredInProduction('STORAGE_CLEANUP_CRON_SECRET', NODE_ENV),
 
   // Tunables with safe defaults.
   JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN ?? '15m',

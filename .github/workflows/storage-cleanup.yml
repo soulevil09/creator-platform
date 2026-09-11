@@ -1,0 +1,56 @@
+# Daily storage-hygiene sweep (Session 09).
+#
+# Same shape and same reasoning as subscription-renewals.yml and
+# weekly-payout.yml: the logic (find soft-deleted Content and expired
+# GenerationJob rows, delete their objects, null their keys) lives in the API
+# behind one service, so this workflow's whole job is to say "now". A second
+# code path into the bucket would be a second place to get the idempotency
+# wrong.
+#
+# Auth is the shared secret `STORAGE_CLEANUP_CRON_SECRET`, compared in constant
+# time by the endpoint. A cron job has no user session, so it has no JWT to
+# present. Both secrets live in GitHub Actions repository secrets and are never
+# echoed: `curl` reads the header value from the environment, so it never
+# appears in the run log.
+name: Storage cleanup
+
+on:
+  schedule:
+    # Daily at 07:00 UTC (04:00 BRT) — an hour after the renewal sweep, so the
+    # two never contend, and still a quiet hour. Cron in GitHub Actions is
+    # best-effort; a late or missed run is harmless because the sweep is
+    # idempotent by query — whatever it did not purge today it purges tomorrow.
+    - cron: '0 7 * * *'
+  # Manual trigger for a missed day or a one-off backlog.
+  workflow_dispatch:
+
+# Never let two runs overlap. The compare-and-set on `storageKey` makes an
+# overlap harmless, but there is no reason to make the database arbitrate.
+concurrency:
+  group: storage-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: Trigger storage cleanup sweep
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /api/admin/storage/cleanup/run
+        env:
+          API_PUBLIC_URL: ${{ secrets.API_PUBLIC_URL }}
+          STORAGE_CLEANUP_CRON_SECRET: ${{ secrets.STORAGE_CLEANUP_CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "${API_PUBLIC_URL}" ] || [ -z "${STORAGE_CLEANUP_CRON_SECRET}" ]; then
+            echo "::error::API_PUBLIC_URL and STORAGE_CLEANUP_CRON_SECRET must be set as repository secrets."
+            exit 1
+          fi
+          # --fail-with-body so a non-2xx exits non-zero (the run turns red)
+          # while still printing what the API said. The summary body carries
+          # only aggregate counts — no ids, no storage keys.
+          curl --silent --show-error --fail-with-body \
+            --max-time 600 \
+            -X POST "${API_PUBLIC_URL}/api/admin/storage/cleanup/run" \
+            -H "X-Storage-Cleanup-Cron-Secret: ${STORAGE_CLEANUP_CRON_SECRET}" \
+            -H 'Content-Type: application/json' \
+            | tee "$GITHUB_STEP_SUMMARY"

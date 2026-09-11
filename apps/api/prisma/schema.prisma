@@ -181,7 +181,7 @@ model Content {
   description  String?
   type         ContentType
   tier         ContentTier @default(STANDARD)
-  storageKey   String // S3 key, never exposed externally
+  storageKey   String? // S3 key, never exposed externally; null once the Session 09 cleanup sweep has purged the object
   mimeType     String
   sizeBytes    Int
   width        Int? // pixels, images only
@@ -189,7 +189,7 @@ model Content {
   durationSecs Int? // seconds, videos only (null at MVP — no ffprobe)
   isPublished  Boolean     @default(false)
   viewCount    Int         @default(0)
-  deletedAt    DateTime? // soft-delete tombstone; storage cleanup deferred
+  deletedAt    DateTime? // soft-delete tombstone; object purged by the daily storage-cleanup sweep (Session 09)
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
 

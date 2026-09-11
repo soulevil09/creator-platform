@@ -69,9 +69,11 @@ export interface FakeContent {
   title: string;
   type: 'IMAGE' | 'VIDEO';
   tier: FakeTier;
-  storageKey: string;
+  /** Null once the Session 09 cleanup sweep has purged the object. */
+  storageKey: string | null;
   mimeType: string;
   isPublished: boolean;
+  viewCount: number;
   deletedAt: Date | null;
   createdAt: Date;
 }
@@ -351,19 +353,76 @@ export function createFakePrisma() {
     return true;
   };
 
-  /** Scalar equality plus `{ in }` / `{ not }` — the shapes the generation module issues. */
-  const jobMatches = (job: FakeGenerationJob, where: Where): boolean => {
+  /**
+   * Scalar equality plus `{ in }` / `{ not }` / date bounds — the shapes the
+   * generation module and the Session 09 cleanup sweep issue. Shared by the
+   * `Content` and `GenerationJob` delegates, whose sweep queries are identical.
+   */
+  const rowMatches = (row: object, where: Where): boolean => {
     for (const [key, condition] of Object.entries(where)) {
-      const value = (job as unknown as Record<string, unknown>)[key];
+      const value = (row as Record<string, unknown>)[key];
       if (condition !== null && typeof condition === 'object' && !(condition instanceof Date)) {
-        const op = condition as { in?: unknown[]; not?: unknown };
+        const op = condition as {
+          in?: unknown[];
+          not?: unknown;
+          lt?: Date | string;
+          lte?: Date | string;
+          gt?: Date | string;
+          gte?: Date | string;
+        };
         if (Array.isArray(op.in) && !op.in.includes(value)) return false;
         if ('not' in op && value === op.not) return false;
+        // Dates compare by instant, strings (the id keyset cursor) lexically.
+        const cmp = (bound: unknown) => {
+          const a = value instanceof Date ? value.getTime() : (value as string);
+          const b = bound instanceof Date ? bound.getTime() : (bound as string);
+          return a < b ? -1 : a > b ? 1 : 0;
+        };
+        if (op.lt !== undefined && !(cmp(op.lt) < 0)) return false;
+        if (op.lte !== undefined && !(cmp(op.lte) <= 0)) return false;
+        if (op.gt !== undefined && !(cmp(op.gt) > 0)) return false;
+        if (op.gte !== undefined && !(cmp(op.gte) >= 0)) return false;
         continue;
       }
       if (value !== condition) return false;
     }
     return true;
+  };
+  const jobMatches = (job: FakeGenerationJob, where: Where): boolean => rowMatches(job, where);
+
+  /**
+   * `orderBy` + `cursor`/`skip`/`take` — Prisma's cursor pagination as the
+   * gallery read and the cleanup sweep issue it. Accepts a single clause or a
+   * list of clauses.
+   */
+  const paginate = <T extends { id: string }>(
+    rows: T[],
+    args: {
+      orderBy?: Record<string, 'asc' | 'desc'> | Array<Record<string, 'asc' | 'desc'>>;
+      take?: number;
+      cursor?: { id: string };
+      skip?: number;
+    },
+  ): T[] => {
+    const clauses = Array.isArray(args.orderBy) ? args.orderBy : args.orderBy ? [args.orderBy] : [];
+    let out = rows;
+    for (const clause of [...clauses].reverse()) {
+      const [field, dir] = Object.entries(clause)[0];
+      const sign = dir === 'asc' ? 1 : -1;
+      out = [...out].sort((a, b) => {
+        const av = (a as unknown as Record<string, unknown>)[field];
+        const bv = (b as unknown as Record<string, unknown>)[field];
+        if (av instanceof Date && bv instanceof Date) {
+          return (av.getTime() - bv.getTime()) * sign;
+        }
+        return String(av).localeCompare(String(bv)) * sign;
+      });
+    }
+    if (args.cursor) {
+      const at = out.findIndex((r) => r.id === args.cursor!.id);
+      out = at === -1 ? [] : out.slice(at + (args.skip ?? 0));
+    }
+    return args.take === undefined ? out : out.slice(0, args.take);
   };
 
   const findTx = (where: Where): FakeTransaction | undefined => {
@@ -434,18 +493,37 @@ export function createFakePrisma() {
     content: {
       findUnique: async ({ where }: { where: { id: string } }) =>
         content.find((c) => c.id === where.id) ?? null,
-      findMany: async ({ where }: { where: Where }) =>
-        content.filter((c) => {
-          if (where.modelId !== undefined && c.modelId !== where.modelId) return false;
-          if (where.deletedAt === null && c.deletedAt !== null) return false;
-          if (where.isPublished !== undefined && c.isPublished !== where.isPublished) return false;
-          const tierFilter = where.tier as { in?: FakeTier[] } | FakeTier | undefined;
-          if (typeof tierFilter === 'string' && c.tier !== tierFilter) return false;
-          if (tierFilter && typeof tierFilter === 'object' && Array.isArray(tierFilter.in)) {
-            if (!tierFilter.in.includes(c.tier)) return false;
-          }
-          return true;
-        }),
+      findMany: async ({
+        where,
+        ...page
+      }: {
+        where: Where;
+        orderBy?: Record<string, 'asc' | 'desc'> | Array<Record<string, 'asc' | 'desc'>>;
+        take?: number;
+        cursor?: { id: string };
+        skip?: number;
+        select?: unknown;
+      }) => {
+        track('content.findMany');
+        return paginate(
+          content.filter((c) => rowMatches(c, where)),
+          page,
+        );
+      },
+      /** The fire-and-forget viewCount bump the serve path issues. */
+      update: async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
+        const row = content.find((c) => c.id === where.id);
+        if (!row) throw new Error('record not found');
+        Object.assign(row, applyNumericOps(row, data));
+        return row;
+      },
+      /** The cleanup sweep's compare-and-set: `WHERE id = ? AND storageKey = ?`. */
+      updateMany: async ({ where, data }: { where: Where; data: Record<string, unknown> }) => {
+        track('content.updateMany');
+        const matched = content.filter((c) => rowMatches(c, where));
+        for (const row of matched) Object.assign(row, data);
+        return { count: matched.length };
+      },
     },
 
     contentAccess: {
@@ -765,7 +843,6 @@ export function createFakePrisma() {
         }),
     },
 
-
     // ── Messaging (Session 07) ───────────────────────────────────────────────
     conversation: {
       findUnique: async ({ where }: { where: Where }) => {
@@ -975,7 +1052,10 @@ export function createFakePrisma() {
       findMany: async ({ where }: { where: Where; orderBy?: unknown }) => {
         track('referenceImage.findMany');
         return referenceImages
-          .filter((img) => where.modelProfileId === undefined || img.modelProfileId === where.modelProfileId)
+          .filter(
+            (img) =>
+              where.modelProfileId === undefined || img.modelProfileId === where.modelProfileId,
+          )
           .slice()
           .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
       },
@@ -1023,39 +1103,26 @@ export function createFakePrisma() {
         track('generationJob.findFirst');
         return generationJobs.find((j) => jobMatches(j, where)) ?? null;
       },
-      /** The cursor-paginated gallery read over `(createdAt DESC, id DESC)`. */
+      /**
+       * The cursor-paginated gallery read over `(createdAt DESC, id DESC)`, and
+       * the cleanup sweep's `(id ASC)` walk.
+       */
       findMany: async ({
         where,
-        orderBy,
-        take,
-        cursor,
-        skip = 0,
+        ...page
       }: {
         where: Where;
-        orderBy?: Array<Record<string, 'asc' | 'desc'>>;
+        orderBy?: Record<string, 'asc' | 'desc'> | Array<Record<string, 'asc' | 'desc'>>;
         take?: number;
         cursor?: { id: string };
         skip?: number;
+        select?: unknown;
       }) => {
         track('generationJob.findMany');
-        let rows = generationJobs.filter((j) => jobMatches(j, where));
-        for (const clause of [...(orderBy ?? [])].reverse()) {
-          const [field, dir] = Object.entries(clause)[0];
-          const sign = dir === 'asc' ? 1 : -1;
-          rows = [...rows].sort((a, b) => {
-            const av = (a as unknown as Record<string, unknown>)[field];
-            const bv = (b as unknown as Record<string, unknown>)[field];
-            if (av instanceof Date && bv instanceof Date) {
-              return (av.getTime() - bv.getTime()) * sign;
-            }
-            return String(av).localeCompare(String(bv)) * sign;
-          });
-        }
-        if (cursor) {
-          const at = rows.findIndex((j) => j.id === cursor.id);
-          rows = at === -1 ? [] : rows.slice(at + skip);
-        }
-        return take === undefined ? rows : rows.slice(0, take);
+        return paginate(
+          generationJobs.filter((j) => jobMatches(j, where)),
+          page,
+        );
       },
       update: async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
         track('generationJob.update');
@@ -1190,6 +1257,7 @@ export function seedContent(
     storageKey: `content/${overrides.modelId}/seed_${n}.jpg`,
     mimeType: 'image/jpeg',
     isPublished: true,
+    viewCount: 0,
     deletedAt: null,
     createdAt: new Date(Date.now() + n),
     ...overrides,

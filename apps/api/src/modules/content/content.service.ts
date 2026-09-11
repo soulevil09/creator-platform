@@ -18,13 +18,12 @@ import type { PrismaClient } from '../../lib/prisma.js';
 import type { PrismaTransactionClient } from '../wallet/wallet.service.js';
 import type { StorageClient } from '../../lib/storage.js';
 import type { ImageProcessor } from '../../lib/image.js';
+import { traceWatermarkLabel, type TraceRecorder } from '../protection/trace.js';
 
 /** Thumbnail signed-URL TTL — capped at the session's 300s maximum. */
 const THUMBNAIL_URL_TTL = 300;
 /** Raw-video signed-URL TTL for the /serve endpoint. */
 const VIDEO_SERVE_URL_TTL = 60;
-/** Platform label burned into the per-user watermark. */
-const WATERMARK_BRAND = 'CreatorPlatform';
 
 /** The only grant reason that satisfies PREMIUM-tier access. */
 const PREMIUM_GRANT_REASON = 'subscription_premium';
@@ -46,6 +45,8 @@ export interface ContentServiceDeps {
   images: ImageProcessor;
   /** Bucket to read/write objects in (from STORAGE_BUCKET). */
   bucket: string;
+  /** Session 09: mints the per-viewer trace code and writes its AuditLog row. */
+  trace: TraceRecorder;
 }
 
 export interface UploadFile {
@@ -76,11 +77,19 @@ export interface ImageServeResult {
   mimeType: string;
 }
 
-/** Video serve result: caller returns the signed URL as JSON. */
+/**
+ * Video serve result: caller returns the signed URL as JSON, plus the trace
+ * code the player overlays (Session 09, Option B — see CLAUDE.md). The file
+ * behind `signedUrl` is NOT watermarked: the code protects the viewing
+ * surface, not the bytes, and someone who fetches the URL directly within its
+ * 60 s TTL gets the unmarked original. That residual risk is accepted and
+ * documented, not hidden.
+ */
 export interface VideoServeResult {
   kind: 'video';
   signedUrl: string;
   expiresIn: number;
+  traceCode: string;
 }
 
 export type ServeResult = ImageServeResult | VideoServeResult;
@@ -94,7 +103,13 @@ function accessIsActive(row: { expiresAt: Date | null }): boolean {
   return row.expiresAt === null || row.expiresAt.getTime() > Date.now();
 }
 
-export function createContentService({ prisma, storage, images, bucket }: ContentServiceDeps) {
+export function createContentService({
+  prisma,
+  storage,
+  images,
+  bucket,
+  trace,
+}: ContentServiceDeps) {
   /**
    * Decide whether `requester` may view `content`, and why. Owner and admin
    * always pass; FREE is public; STANDARD needs any active grant; PREMIUM needs
@@ -286,9 +301,12 @@ export function createContentService({ prisma, storage, images, bucket }: Conten
           tier: row.tier as ContentTier,
           isPublished: row.isPublished,
           // Signed URL only when the requester may view it; null otherwise.
-          thumbnailUrl: hasAccess
-            ? await storage.getSignedUrl(bucket, row.storageKey, THUMBNAIL_URL_TTL)
-            : null,
+          // (`storageKey` is only ever null on a purged soft-deleted row, which
+          // the `deletedAt: null` filter above already excludes.)
+          thumbnailUrl:
+            hasAccess && row.storageKey !== null
+              ? await storage.getSignedUrl(bucket, row.storageKey, THUMBNAIL_URL_TTL)
+              : null,
           hasAccess,
           viewCount: row.viewCount,
           createdAt: iso(row.createdAt),
@@ -300,14 +318,17 @@ export function createContentService({ prisma, storage, images, bucket }: Conten
 
     /**
      * Resolve content delivery for an authenticated requester. Images are
-     * fetched, watermarked with the platform brand + the requester's email, and
-     * returned as bytes (caller streams them with Cache-Control: no-store).
-     * Videos return a short-lived signed URL (no server-side watermark at MVP).
-     * 403 when the requester lacks access. viewCount is bumped fire-and-forget.
+     * fetched, watermarked with the platform brand + a per-viewer forensic
+     * trace code (Session 09 — never the requester's email or id), and returned
+     * as bytes (caller streams them with Cache-Control: no-store). Videos
+     * return a short-lived signed URL plus the same kind of trace code for the
+     * player to overlay. Either way one AuditLog row records who was served
+     * which code. 403 when the requester lacks access. viewCount is bumped
+     * fire-and-forget.
      */
     async serve(contentId: string, requester: Requester): Promise<ServeResult> {
       const content = await prisma.content.findUnique({ where: { id: contentId } });
-      if (!content || content.deletedAt) {
+      if (!content || content.deletedAt || content.storageKey === null) {
         throw new ContentError(404, 'Content not found');
       }
 
@@ -334,27 +355,42 @@ export function createContentService({ prisma, storage, images, bucket }: Conten
         .update({ where: { id: content.id }, data: { viewCount: { increment: 1 } } })
         .catch(() => {});
 
+      // `authenticate` guarantees a userId on this path; the guard keeps the
+      // type honest without inventing an anonymous trace.
+      if (!requester.userId) {
+        throw new ContentError(401, 'Unauthorized');
+      }
+      // The trace is issued (and audited) before the bytes leave — the audit
+      // row is the only way a code on a leaked file resolves to a viewer.
+      const { traceCode } = await trace.issue({
+        entity: 'Content',
+        entityId: content.id,
+        viewerId: requester.userId,
+      });
+
       if (content.type === 'VIDEO') {
         const signedUrl = await storage.getSignedUrl(
           bucket,
           content.storageKey,
           VIDEO_SERVE_URL_TTL,
         );
-        return { kind: 'video', signedUrl, expiresIn: VIDEO_SERVE_URL_TTL };
+        return { kind: 'video', signedUrl, expiresIn: VIDEO_SERVE_URL_TTL, traceCode };
       }
 
       const raw = await storage.getObject(bucket, content.storageKey);
-      const label = requester.userId
-        ? `${WATERMARK_BRAND} • ${await emailFor(prisma, requester.userId)}`
-        : WATERMARK_BRAND;
-      const watermarked = await images.watermark(raw, label, content.mimeType);
+      const watermarked = await images.watermark(
+        raw,
+        traceWatermarkLabel(traceCode),
+        content.mimeType,
+      );
       return { kind: 'image', buffer: watermarked, mimeType: content.mimeType };
     },
 
     /**
      * Soft-delete content: mark `deletedAt` and unpublish. Models may only
-     * delete their own; admins may delete any. The underlying object is left in
-     * storage for a future cleanup job (out of scope).
+     * delete their own; admins may delete any. The underlying object is purged
+     * by the daily storage-cleanup sweep (Session 09), which then nulls
+     * `storageKey`.
      */
     async softDelete(userId: string, role: Role, contentId: string): Promise<void> {
       const content = await prisma.content.findUnique({ where: { id: contentId } });
@@ -370,12 +406,6 @@ export function createContentService({ prisma, storage, images, bucket }: Conten
       });
     },
   };
-}
-
-/** Fetch a user's email for the watermark label; falls back to the id. */
-async function emailFor(prisma: PrismaClient, userId: string): Promise<string> {
-  const user = await prisma.user.findUnique({ where: { id: userId } });
-  return user?.email ?? userId;
 }
 
 export type ContentService = ReturnType<typeof createContentService>;
