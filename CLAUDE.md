@@ -420,17 +420,20 @@ The provider is selected at startup via env var and injected via the container. 
 
 ---
 
-### Session 09.5 — Lei FELCA: Age Verification (CPF + Face ID) ⏳ Pending — **NEXT**
+### Session 09.5 — Lei FELCA: Age Verification (CPF + Face ID) ⏳ Pending — **DEFERRED**
 **File:** `.claude/sessions/session-09.5.md` _(to be written)_  
-**Domain:** Lei 15.211/2025 compliance — CPF + facial age verification for subscribers before any 18+ content is served; KYC vendor abstraction (`IAgeVerificationProvider`), verification status on `User`, gate in `resolveAccess`/serve paths, ANPD-grade audit trail. **Hard deadline: 17/03/2026.**
+**Domain:** Lei 15.211/2025 compliance — CPF + facial age verification for subscribers before any 18+ content is served; KYC vendor abstraction (`IAgeVerificationProvider`), verification status on `User`, gate in `resolveAccess`/serve paths, ANPD-grade audit trail.
 
-**External Prerequisites:**
-- [ ] Choose a KYC/liveness vendor with CPF validation and adult-platform acceptance (candidates to evaluate: idwall, unico, Serpro Datavalid for CPF; confirm adult-content policy before signing)
+**Deliberately deferred [2026-09-14]** — business decision to prioritize time-to-MVP over closing this gap immediately. Accepted risk while deferred: full ANPD enforcement with fines starts January 2027 (not immediately), and the definitive technical guide was still mid-public-consultation as of Sept 2026 — but the platform runs non-compliant with the self-declaration ban in the interim. **Must ship before meaningful Brazilian subscriber volume.**
+
+**External Prerequisites (when resumed):**
+- [ ] Confirm CAF/Certta's enterprise-tier biometric face-match pricing — the self-service "Certta Start" plan (R$200–600/mo, R$1.50–2.50/consulta) covers CPF/document/background checks only; CPF alone is explicitly equated to self-declaration in ANPD's draft guide, so it does NOT satisfy the law on its own
+- [ ] Confirm CAF/Certta (or alternative: idwall, unico, Serpro Datavalid direct — the last requires SENATRAN/Credencia accreditation + a GCC intermediary, heavier onboarding) accepts adult-content platforms as a client
 - [ ] Vendor API credentials + webhook secret
 
 ---
 
-### Session 10 — i18n & Multilingual ⏳ Pending
+### Session 10 — i18n & Multilingual ⏳ Pending — **NEXT**
 **File:** `.claude/sessions/session-10.md`  
 **Domain:** PT-BR + EN, i18n framework, all strings externalized
 
@@ -803,7 +806,7 @@ All `.env*` files are gitignored; examples contain placeholders only.
 - **Woovi adult content policy** — Woovi/OpenPix é um gateway PIX brasileiro regulado. Antes de ir ao ar em produção com conteúdo explícito adulto, confirmar com o suporte deles (suporte@woovi.com) se aceitam plataformas adult 18+. PIX em si não tem restrição de conteúdo (é infraestrutura do Banco Central), mas o gateway pode ter política própria.
 - **CCBill deferred to post-MVP** — $1,450/yr Visa+MC registration fees make card processing financially unviable at MVP stage. CCBill slot is scaffolded as `MockPaymentProvider`. Activate when monthly revenue covers the annual fee.
 - **NOWPayments crypto-to-fiat conversion** — NOWPayments settles in cryptocurrency. To receive BRL/USD fiat, platform must maintain exchange accounts (Bybit/OKX/Binance) and execute regular USDT→fiat withdrawals. This is an operational step outside the codebase.
-- **Lei FELCA compliance (Brazil)** — Lei 15.211/2025 requires adult platforms to implement CPF + Face ID age verification by 17/03/2026. Penalties: up to R$50M or 10% of annual Brazil revenue. **Scoped as Session 09.5 — the next session** (deliberately kept out of Session 09: distinct KYC vendor integration with a hard legal deadline). ANPD is the enforcement authority.
+- **Lei FELCA compliance (Brazil) — DEFERRED, accepted risk** — Lei 15.211/2025 requires adult platforms to implement CPF + Face ID age verification. Penalties: up to R$50M or 10% of annual Brazil revenue; full ANPD enforcement begins January 2027. **Deliberately deferred past Session 09** (business decision, 2026-09-14) to prioritize time-to-MVP — the platform runs non-compliant with the self-declaration ban until Session 09.5 ships. Note: bare CPF validation does not satisfy the law on its own (ANPD's draft guide equates it to self-declaration without proof of ownership) — the eventual fix needs a real biometric face-match, not just a CPF lookup. Must resume before meaningful Brazilian subscriber volume. ANPD is the enforcement authority.
 - **Forensic trace lookup is an unindexed JSON query** (Session 09) — resolving a leaked code means `AuditLog WHERE metadata->>'traceCode' = ?`, a sequential scan over the audit table. Fine for the rare manual investigation at MVP; add an expression index (or a dedicated column) when the table or the investigation cadence grows. Candidate: Session 12 index review.
 - **One `AuditLog` row per image/video serve** (Session 09) — the trace trail grows with view volume, not with money events. Harmless at MVP; a retention policy for `content.served` / `generation.image_served` rows (e.g. 12 months) belongs in the same reconciliation/cleanup job family flagged for Session 11/12.
 - **`ProtectedMedia` is not wired into a real viewer yet** (Session 09) — there is no content-viewing page; the component is exercised only by the `/dev/protected-media` demo (placeholders, 404 in prod) and its tests. The future subscriber UI must wrap every `<img>`/`<video>` served from `/serve` or `/generations/:id/image` in it and pass the `traceCode` (video: from the JSON; image: a future header or the code is simply already burned in).
@@ -818,3 +821,5 @@ All `.env*` files are gitignored; examples contain placeholders only.
 ---
 
 ## Last Updated — Session 09 complete: anti-leak & content protection. Per-viewer forensic trace codes (`modules/protection/trace.ts`: HMAC-SHA256 → 8-char base32, resolvable only through a per-serve `AuditLog` row; the subscriber's email is no longer in any watermark) wired into both image-serving endpoints and — as **Option B**, justified in Architecture Decisions — returned as `traceCode` for video, whose raw signed URL stays unmarked (documented residual risk). `ProtectedMedia` React component (context-menu/drag blocked, blur + pause on tab hide/window blur, persistent trace overlay; explicitly deterrent-only) + `/dev/protected-media` demo (placeholders, 404 in prod) + the web package's first Vitest suite (jsdom + RTL). Daily `POST /api/admin/storage/cleanup/run` sweep purges soft-deleted `Content` and expired `GenerationJob` objects, then nulls `storageKey` (delete-then-null CAS, keyset pages of 100, counts-only summary) — resolving the Session 04 and Session 08 orphaned-object Open Items; migration `20260912120000_nullable_content_storage_key` generated **and applied** (11 live). `WATERMARK_TRACE_SECRET` (required everywhere, ≥ 32 chars) and `STORAGE_CLEANUP_CRON_SECRET` added to `env.ts`. 331 API tests (22 new) + 7 web tests, zero regressions; `pnpm turbo run typecheck lint test build` and root `pnpm lint` green. **Next: Session 09.5 (Lei FELCA — CPF + Face ID age verification, deadline 17/03/2026).** [2026-09-12]
+
+**[2026-09-14] Roadmap decision:** Session 09.5 (Lei FELCA) deferred — business decision to prioritize time-to-MVP; logged as an accepted-risk Open Item and in the Session Map above, not dropped. **Next: Session 10 (i18n & Multilingual).**
