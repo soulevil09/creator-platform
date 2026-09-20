@@ -433,16 +433,36 @@ The provider is selected at startup via env var and injected via the container. 
 
 ---
 
-### Session 10 — i18n & Multilingual ⏳ Pending — **NEXT**
+### Session 10 — i18n & Multilingual ✅ Complete
 **File:** `.claude/sessions/session-10.md`  
 **Domain:** PT-BR + EN, i18n framework, all strings externalized
 
+**Summary:**
+- **Frontend — `next-intl` v4.** Per-request `getRequestConfig` (`apps/web/src/i18n/request.ts`) resolves the locale server-side before any component renders — cookie (`NEXT_LOCALE`) → `Accept-Language` → `NEXT_PUBLIC_DEFAULT_LOCALE` — so the first HTML byte is already in the right language, no client-side flash of the wrong locale (proven against a **real** `next build`/`next start` server, not a mock). Message catalogs `apps/web/messages/{en,pt-BR}.json`; only the active locale's catalog ships to the client via `NextIntlClientProvider`. Routing is **cookie-only, no `/en/` prefix** — every existing route stays unprefixed; justified in Architecture Decisions below.
+- Every literal string in `layout.tsx` (incl. `generateMetadata`), `page.tsx`, `wallet/page.tsx`, `ProtectedMedia.tsx` (default `aria-label` + `role="status"` live region) and the `/dev/protected-media` demo now reads from the catalog. `LocaleSwitcher.tsx` — client component, writes the `NEXT_LOCALE` cookie + `router.refresh()`, takes effect on the next navigation with no restart.
+- `User.preferredLocale String @default("pt-BR")` added to Prisma; migration `20260920120000_add_user_preferred_locale` **generated and applied** (12 migrations now live). Allowlisted by Zod (`'pt-BR' | 'en'`) at every write path — a plain `String` column, not a DB enum, so a third language later is a code change only.
+- `POST /api/auth/register` accepts an optional `locale` (lenient — an invalid value falls through to `Accept-Language`, then default, and never blocks signup). New `PATCH /api/auth/me/locale` — `authenticate`, strict `z.enum` (400 on anything off the allowlist), rate-limited like the project's other authenticated write endpoints. `GET /api/auth/me` now echoes `preferredLocale`.
+- `Emailer.sendVerificationEmail` / `sendRenewalReminderEmail` gain a `locale` parameter; both templates exist in full PT-BR and EN as a plain `Record<Locale, template>` map in `email.ts` — no i18n runtime dependency on the API, mirroring the `CHANNEL_CURRENCY` keyed-map pattern. `formatAmount` rebuilt on `Intl.NumberFormat` (`R$ 29,90` vs `$29.99` for the same cents); dates through `Intl.DateTimeFormat`. `escapeHtml` still guards every interpolated value in both locales.
+- `SUBSCRIPTION_PLANS` / `CREDIT_PACKS` / `GENERATION_PRESETS` labels are now `LocalizedLabel = Record<Locale, string>` (key parity enforced by the type itself), resolved via `resolveLabel(label, locale)` — a pure in-memory lookup, no new DB/network call on any hot path. `GenerationJob.userPrompt` and the Woovi/NOWPayments charge `description` deliberately keep storing the **canonical English** label (`CANONICAL_LABEL_LOCALE`) rather than the viewer's language — see Notes below.
+- `negotiateLocale` (RFC 9110 `Accept-Language` parsing, q-weights honoured) lives in `@creator-platform/shared` so the API and the web app share one parser; every entry point re-validates its output with the same Zod allowlist before use. Catalog imports are literal per-locale entries in a `Record`, never a path built from request input.
+- 349 API tests (+18: 7 auth, 9 email, 2 subscriptions), 33 web tests (+26, incl. 5 real-server SSR tests), 6 new shared tests; zero regressions. `pnpm turbo run typecheck lint test build` and root `pnpm lint` (incl. jsx-a11y) all green.
+
+**Notes / deviations:**
+- **`userPrompt` and the payment-provider charge description stay in canonical English, not the viewer's locale.** `GenerationJob.userPrompt` is a record of what was requested (`presetId` is stored alongside for display-time resolution) — storing English keeps pre/post-Session-10 rows byte-identical and avoids freezing a language into a persisted request. The Woovi/NOWPayments `description` string is provider-facing, not subscriber-facing, so localizing it would be new payment behavior — out of this session's scope.
+- **Cookie-only locale routing, no path prefix.** Every existing route (`/`, `/wallet`, `/dev/protected-media`) is unprefixed and the API already emits absolute links into them (`/verify-email?token=…`, `/subscriptions`); the platform is auth-gated end to end, so per-language URLs buy no SEO benefit here.
+- **`GET /me` now returns `preferredLocale`** — not explicit in the spec, but without it the value `PATCH /me/locale` writes would be unreadable by any client.
+- **Wallet prices now follow the UI locale** (`R$19.90` when the switcher is set to `en`) rather than being currency-driven (`pt-BR` for BRL regardless of UI language) — a direct consequence of removing the page's hardcoded `Intl.NumberFormat('pt-BR' | 'en-US', …)` branch in favor of the resolved locale.
+- **`zod` added to `apps/web`** (server-only usage in `src/i18n/locale.ts`, never bundled to the browser) so the web app's cookie/header/env allowlist reuses the same Zod-enum pattern as the API instead of a second validation approach.
+- Two pre-Session-10 assertions updated with the label-shape change, values unchanged: `generation.test.ts` (`PRESET.label` → `PRESET.label.en`) and `auth.test.ts` (`/me` now includes `preferredLocale`).
+- **ARIA validation:** `eslint-plugin-jsx-a11y` green, zero findings. `ProtectedMedia`'s default label and live-region text are asserted against the real catalog in both locales.
+
 **External Prerequisites:**
-- [ ] No new external accounts required
+- [x] No new external accounts required
+- [x] Migration `20260920120000_add_user_preferred_locale` applied — the Supabase project had paused between generation and apply (same recurring issue as Session 07); resolved by restoring the project in the dashboard and re-running `prisma migrate deploy`
 
 ---
 
-### Session 11 — Admin Dashboard ⏳ Pending
+### Session 11 — Admin Dashboard ⏳ Pending — **NEXT**
 **File:** `.claude/sessions/session-11.md`  
 **Domain:** Metrics, user management, model approval, payout oversight, moderation
 
@@ -591,6 +611,15 @@ _Session 09 — anti-leak & content protection decisions:_
 
 - **`@testing-library/react` + jsdom for the first web suite.** The component is entirely DOM behaviour (a prevented `contextmenu`, `visibilitychange`, `blur`/`focus`, `HTMLMediaElement.pause`) — meaningless in the API suite's `node` environment. jsdom is the lightest environment that implements those; RTL queries the DOM the way a user (and the jsx-a11y rules) perceive it, and is the React 18 standard (`react-test-renderer` is deprecated and cannot dispatch real DOM events). `esbuild.jsx: 'automatic'` in the Vitest config avoids a Vite React plugin for a test-only concern. Both are devDependencies of `apps/web` only.
 
+_Session 10 — i18n & multilingual decisions:_
+
+- **`next-intl` over a hand-rolled solution or `react-i18next`.** App Router server components need translations resolved *before* render, not after hydration — `next-intl`'s `getRequestConfig` hook is exactly that seam, plus typed message keys and ICU pluralisation for free. `react-i18next` is a client-rendering-first library; using it here would mean either losing server rendering for translated text or bolting on a parallel server mechanism `next-intl` already provides natively.
+- **Cookie-only routing over `/en/`-prefixed paths.** A prefix is what earns its keep for SEO on public, crawlable pages; this platform is auth-gated end to end (every route sits behind login except the marketing splash), so there is no public page a prefix would help rank, and adding one would mean rewriting every absolute link the API already emits (`/verify-email?token=…`, `/subscriptions`) to be locale-aware. A cookie the switcher writes, read ahead of `Accept-Language` on every request, gets the same "first byte in the right language" outcome with zero routing changes.
+- **`Record<Locale, string>` for catalog labels, not a `labelKey` into a message catalog.** Both the API (email, provider charge descriptions, `GenerationJob.userPrompt`) and the web app read these labels, and the API deliberately carries no i18n runtime for two small templates — a `labelKey` would need a second lookup mechanism there. A record is an in-memory property read on every hot path (checkout, generation), and the type itself enforces key parity: an entry missing a locale does not compile.
+- **`GenerationJob.userPrompt` and provider charge descriptions store the canonical (English) label, not the viewer's language.** A generation record is evidence of what was requested; letting its stored language drift with whichever locale the subscriber happened to be using would make otherwise-identical requests produce different database rows. The stable `presetId` is kept alongside for any future display-time resolution — the canonical string is for audit/record-keeping, not rendering.
+- **A plain `Record<Locale, template>` map for transactional email, not an i18n runtime on the API.** Two templates (verification, renewal reminder) do not justify a dependency; this is the same small-keyed-map shape the codebase already uses for `CHANNEL_CURRENCY`. `escapeHtml` is threaded through every interpolated value in both locales at the single point each raw string enters, so no localized template can skip it.
+- **`User.preferredLocale` is a plain `String` with a Zod allowlist, not a Prisma enum.** A DB enum migration is the wrong cost for "add a third supported language" — a pure application-layer allowlist change is. The read side still narrows defensively (an unrecognised stored value resolves to the default), so a hand-edited row can never surface as anything outside the allowlist.
+
 _Post-Session 05 — scope correction:_
 
 - **PPV was scaffolded in Session 04 but is out of product scope (see original brief) — removed in a post-Session-05 correction; access to PREMIUM content is subscription-only.** `Content.ppvPriceCents` dropped (migration `20260831025136_remove_ppv`), the `ppv_purchase` grant reason retired, and `resolveAccess` now admits PREMIUM on `subscription_premium` alone (owner/admin unchanged).
@@ -627,15 +656,22 @@ _Pre-Session 05 — payment stack decisions (Stripe permanently excluded):_
 creator-platform/
 ├── apps/
 │   ├── web/                         # Next.js 14 App Router (@creator-platform/web)
-│   │   ├── src/app/layout.tsx
+│   │   ├── messages/                # en.json, pt-BR.json catalogs (Session 10)
+│   │   ├── src/app/layout.tsx       # generateMetadata + NextIntlClientProvider + LocaleSwitcher (Session 10)
 │   │   ├── src/app/page.tsx
-│   │   ├── src/app/wallet/page.tsx  # balance + credit-pack checkout (Session 05)
+│   │   ├── src/app/wallet/page.tsx  # balance + credit-pack checkout (Session 05); localized (Session 10)
 │   │   ├── src/app/dev/protected-media/page.tsx  # ProtectedMedia demo, placeholders only, 404 in prod (Session 09)
+│   │   ├── src/i18n/                # locale resolution + next-intl wiring (Session 10)
+│   │   │   ├── locale.ts            # Zod allowlist, resolveLocale (cookie → header → default), catalog loaders
+│   │   │   ├── request.ts           # next-intl getRequestConfig
+│   │   │   └── global.d.ts          # typed message keys + Locale
 │   │   ├── src/components/
-│   │   │   ├── ProtectedMedia.tsx       # client-side capture deterrents + trace overlay (Session 09)
-│   │   │   └── ProtectedMedia.test.tsx  # 7 tests (jsdom + RTL)
+│   │   │   ├── ProtectedMedia.tsx       # client-side capture deterrents + trace overlay (Session 09); localized (Session 10)
+│   │   │   ├── ProtectedMedia.test.tsx  # 10 tests (jsdom + RTL)
+│   │   │   ├── LocaleSwitcher.tsx       # EN/PT-BR switcher, writes NEXT_LOCALE cookie (Session 10)
+│   │   │   └── LocaleSwitcher.test.tsx
 │   │   ├── vitest.config.ts             # jsdom env, esbuild jsx automatic (Session 09)
-│   │   ├── next.config.mjs
+│   │   ├── next.config.mjs              # createNextIntlPlugin (Session 10)
 │   │   ├── tsconfig.json
 │   │   └── .env.example
 │   └── api/                         # Fastify 5 backend (@creator-platform/api)
@@ -644,7 +680,8 @@ creator-platform/
 │       │   ├── lib/
 │       │   │   ├── env.ts           # Startup env validation (crash if secrets missing)
 │       │   │   ├── prisma.ts        # Singleton PrismaClient
-│       │   │   ├── email.ts         # Resend emailer + Emailer interface
+│       │   │   ├── email.ts         # Resend emailer + Emailer interface; Record<Locale, template> (Session 10)
+│       │   │   ├── email.test.ts    # 9 tests — both locales, escaping, Intl formatting (Session 10)
 │       │   │   ├── storage.ts       # S3-compatible StorageClient (+ getObject)
 │       │   │   └── image.ts         # Injectable ImageProcessor (sharp): dims + watermark
 │       │   ├── middleware/
@@ -692,7 +729,7 @@ creator-platform/
 │       │       └── fastify-jwt.d.ts
 │       ├── prisma/
 │       │   ├── schema.prisma        # User, ModelProfile (+payoutEmail), Content, payments (+cancelAtPeriodEnd) + Payout models + enums
-│       │   ├── migrations/          # …_add_user_model, …_add_model_profile, …_add_content_management, …_add_payments, …_remove_ppv, …_add_payouts, …_add_payout_email, …_add_subscription_lifecycle, …_add_messaging, …_add_generation_jobs, …_nullable_content_storage_key
+│       │   ├── migrations/          # …_add_user_model, …_add_model_profile, …_add_content_management, …_add_payments, …_remove_ppv, …_add_payouts, …_add_payout_email, …_add_subscription_lifecycle, …_add_messaging, …_add_generation_jobs, …_nullable_content_storage_key, …_add_user_preferred_locale
 │       │   └── generated/           # Prisma client output (gitignored)
 │       ├── scripts/
 │       │   └── postinstall.mjs
@@ -702,7 +739,8 @@ creator-platform/
 │       └── .env.example
 ├── packages/
 │   └── shared/                      # Framework-free types/constants/utils
-│       └── src/index.ts             # Role, JwtPayload, AuthUser + locale/currency constants
+│       ├── src/index.ts             # Role, JwtPayload, AuthUser + locale/currency constants; LocalizedLabel, negotiateLocale (Session 10)
+│       └── src/locale.test.ts       # 6 tests — Accept-Language parser + catalog helpers (Session 10)
 ├── .github/workflows/
 │   ├── ci.yml
 │   ├── weekly-payout.yml            # Mon 12:00 UTC → POST /api/payouts/run
@@ -801,7 +839,7 @@ All `.env*` files are gitignored; examples contain placeholders only.
 - ~~**Subscription renewal and cancellation are not implemented**~~ — **resolved in Session 06.5.** A daily cron-triggered sweep (`POST /api/subscriptions/renewals/run`) issues a renewal charge + reminder email before `currentPeriodEnd`, walks lapsed non-payers `ACTIVE → PAST_DUE → EXPIRED` across a configurable grace window, and lands opted-out subscribers on `CANCELED`. `Subscription.cancelAtPeriodEnd` (migration `20260902120000_add_subscription_lifecycle`, applied) backs self-service `POST /model/:modelId/cancel` and `/resume`.
 - **Pix Automático is a future upgrade, not a blocker** (Session 06.5) — Woovi supports Pix Automático, BACEN's recurring-mandate scheme, which would let a PIX subscription be pulled automatically instead of re-charged and re-paid each period. It is a separate, larger retrofit (mandate registration and its own consent/cancellation lifecycle, PIX-only, no crypto equivalent), so Session 06.5 deliberately shipped manual renewal that works identically on both rails. Revisit once PIX renewal volume makes the drop-off from manual payment measurable — candidate alongside Session 11/12.
 - **Renewal charges accumulate as `PENDING` rows when never paid** (Session 06.5) — an unpaid renewal charge stays `PENDING` forever, and that is exactly what keeps the sweep idempotent (it is the "already charged" marker). Harmless at MVP, but there is no expiry sweep, so a long-churned subscriber leaves one stale row per model. Fold into the reconciliation job flagged for Session 11/12.
-- **Renewal reminders are not internationalized** (Session 06.5) — the reminder email is English-only, like the verification email. Both are externalized in Session 10 (i18n).
+- ~~**Renewal reminders are not internationalized**~~ — **resolved in Session 10.** Both the verification and renewal-reminder emails now exist in full in PT-BR and EN via a `Record<Locale, template>` map in `email.ts`, selected by `User.preferredLocale`.
 - **Content published after a subscription starts is not auto-granted** (Session 05) — `ContentAccess` rows are written at confirmation time for the model's then-published catalogue. New uploads mid-period need either a grant-on-publish hook or a subscription-aware check in `resolveAccess`. Revisit when upload cadence matters.
 - **Woovi adult content policy** — Woovi/OpenPix é um gateway PIX brasileiro regulado. Antes de ir ao ar em produção com conteúdo explícito adulto, confirmar com o suporte deles (suporte@woovi.com) se aceitam plataformas adult 18+. PIX em si não tem restrição de conteúdo (é infraestrutura do Banco Central), mas o gateway pode ter política própria.
 - **CCBill deferred to post-MVP** — $1,450/yr Visa+MC registration fees make card processing financially unviable at MVP stage. CCBill slot is scaffolded as `MockPaymentProvider`. Activate when monthly revenue covers the annual fee.
@@ -820,6 +858,4 @@ All `.env*` files are gitignored; examples contain placeholders only.
 
 ---
 
-## Last Updated — Session 09 complete: anti-leak & content protection. Per-viewer forensic trace codes (`modules/protection/trace.ts`: HMAC-SHA256 → 8-char base32, resolvable only through a per-serve `AuditLog` row; the subscriber's email is no longer in any watermark) wired into both image-serving endpoints and — as **Option B**, justified in Architecture Decisions — returned as `traceCode` for video, whose raw signed URL stays unmarked (documented residual risk). `ProtectedMedia` React component (context-menu/drag blocked, blur + pause on tab hide/window blur, persistent trace overlay; explicitly deterrent-only) + `/dev/protected-media` demo (placeholders, 404 in prod) + the web package's first Vitest suite (jsdom + RTL). Daily `POST /api/admin/storage/cleanup/run` sweep purges soft-deleted `Content` and expired `GenerationJob` objects, then nulls `storageKey` (delete-then-null CAS, keyset pages of 100, counts-only summary) — resolving the Session 04 and Session 08 orphaned-object Open Items; migration `20260912120000_nullable_content_storage_key` generated **and applied** (11 live). `WATERMARK_TRACE_SECRET` (required everywhere, ≥ 32 chars) and `STORAGE_CLEANUP_CRON_SECRET` added to `env.ts`. 331 API tests (22 new) + 7 web tests, zero regressions; `pnpm turbo run typecheck lint test build` and root `pnpm lint` green. **Next: Session 09.5 (Lei FELCA — CPF + Face ID age verification, deadline 17/03/2026).** [2026-09-12]
-
-**[2026-09-14] Roadmap decision:** Session 09.5 (Lei FELCA) deferred — business decision to prioritize time-to-MVP; logged as an accepted-risk Open Item and in the Session Map above, not dropped. **Next: Session 10 (i18n & Multilingual).**
+## Last Updated — Session 10 complete: i18n & multilingual. `next-intl` wired end-to-end on the web app with per-request server-side locale resolution (`NEXT_LOCALE` cookie → `Accept-Language` → `NEXT_PUBLIC_DEFAULT_LOCALE`, no path prefix — proven against a real `next build`/`next start` server, not just a mock) and full PT-BR/EN message catalogs covering every existing UI surface (layout, home, wallet, `ProtectedMedia`, the protected-media demo). `User.preferredLocale` (migration `20260920120000_add_user_preferred_locale`, **generated and applied** — 12 migrations live) drives locale-aware transactional email: both the verification and renewal-reminder templates now exist in full in both languages (`Record<Locale, template>` in `email.ts`, no new runtime dependency on the API), with `Intl.NumberFormat`/`Intl.DateTimeFormat` for amounts and dates and `escapeHtml` still guarding every interpolated value in both locales. `SUBSCRIPTION_PLANS`/`CREDIT_PACKS`/`GENERATION_PRESETS` labels are now `LocalizedLabel` records with key parity enforced by the type; `GenerationJob.userPrompt` and payment-provider charge descriptions deliberately keep the canonical English label (see Architecture Decisions). 349 API tests (+18) + 33 web tests (+26, incl. 5 real-server SSR tests) + 6 new shared tests, zero regressions; `pnpm turbo run typecheck lint test build` and root `pnpm lint` (incl. jsx-a11y) all green. **Next: Session 11 (Admin Dashboard).** [2026-09-20]
