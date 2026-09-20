@@ -1,0 +1,67 @@
+{
+  "common": {
+    "brand": "VisorFans"
+  },
+  "metadata": {
+    "title": "VisorFans — Monetization platform for content creators",
+    "description": "We serve digital creators (models, influencers and artists) and their subscribers. We sell monthly subscriptions and digital credit packs through our web portal."
+  },
+  "localeSwitcher": {
+    "label": "Language",
+    "en": "English",
+    "ptBR": "Português (Brasil)"
+  },
+  "home": {
+    "tagline": "Monetization platform for content creators",
+    "description": "We serve digital creators (models, influencers and artists) and their subscribers. We sell monthly subscriptions and digital credit packs through our web portal.",
+    "comingSoon": "🚧 Coming soon — platform under development",
+    "copyright": "© {year} {brand}"
+  },
+  "wallet": {
+    "title": "Wallet",
+    "balanceHeading": "Credit balance",
+    "creditsUnit": "credits",
+    "refreshBalance": "Refresh balance",
+    "buyHeading": "Buy credits",
+    "paymentMethod": "Payment method",
+    "channel": {
+      "pix": "PIX (BRL)",
+      "crypto": "Crypto (USD)"
+    },
+    "packSummary": "{credits} credits · {price}",
+    "buy": "Buy",
+    "buyAria": "Buy the {pack} pack with {credits} credits",
+    "status": {
+      "signInRequired": "Sign in to see your balance.",
+      "balanceFailed": "Could not load your balance.",
+      "creatingCharge": "Creating charge…",
+      "checkoutFailed": "Could not start the payment.",
+      "chargeCreated": "Charge created. Complete the payment to receive your credits."
+    },
+    "pix": {
+      "heading": "Pay with PIX",
+      "qrAlt": "PIX QR code to pay this charge",
+      "copyPaste": "PIX copy and paste"
+    },
+    "crypto": {
+      "heading": "Pay with crypto",
+      "address": "Address ({currency})",
+      "amount": "Amount to send"
+    }
+  },
+  "protectedMedia": {
+    "defaultLabel": "Protected content",
+    "obscured": "Content hidden while the window is inactive."
+  },
+  "protectedMediaDemo": {
+    "title": "ProtectedMedia — demo",
+    "intro": "Development page with <strong>placeholder assets</strong>. Try it: right-click, try to drag, switch tabs or click outside the window.",
+    "disclaimer": "This is a <strong>deterrent</strong>, not a security control: no web page can stop an OS screenshot, a screen recorder or an external camera. The real protection is server-side (per-viewer forensic watermarking + audit trail); this layer only makes casual capture more awkward and keeps the trace code in frame.",
+    "imageHeading": "Image",
+    "imageLabel": "Protected demo image",
+    "imageAlt": "Blue-to-purple demo gradient",
+    "videoHeading": "Video",
+    "videoNote": "No real source — poster only. In production the overlay receives the <code>traceCode</code> that <code>GET /api/content/:id/serve</code> returns alongside the signed URL.",
+    "videoLabel": "Protected demo video"
+  }
+}

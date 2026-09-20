@@ -15,28 +15,28 @@
 // picker is a real `fieldset`/`legend` radio group; every control has an
 // associated label or `aria-label`; async state is announced through a polite
 // live region; the QR image carries descriptive alt text.
+//
+// Every user-facing string comes from the active locale's catalog (Session 10)
+// via `useTranslations`; catalog labels (`pack.label`) are resolved with
+// `resolveLabel` against `useLocale()`. Error codes the API returns
+// (`insufficient_credits`, …) are machine codes and stay as they are.
 import { useCallback, useEffect, useState } from 'react';
+import { useLocale, useTranslations } from 'next-intl';
 import {
   CHECKOUT_CHANNELS,
   CREDIT_PACKS,
   CHANNEL_CURRENCY,
-  type CheckoutChannel,
+  resolveLabel,
   type CheckoutResponse,
+  type CheckoutChannel,
+  type Locale,
 } from '@creator-platform/shared';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000';
 
-const CHANNEL_LABEL: Record<CheckoutChannel, string> = {
-  pix: 'PIX (BRL)',
-  crypto: 'Cripto (USD)',
-};
-
-/** Minor units → a localized amount string. */
-function formatPrice(cents: number, currency: 'BRL' | 'USD'): string {
-  return new Intl.NumberFormat(currency === 'BRL' ? 'pt-BR' : 'en-US', {
-    style: 'currency',
-    currency,
-  }).format(cents / 100);
+/** Minor units → an amount in the UI's locale (`R$ 19,90` / `R$19.90`). */
+function formatPrice(cents: number, currency: 'BRL' | 'USD', locale: Locale): string {
+  return new Intl.NumberFormat(locale, { style: 'currency', currency }).format(cents / 100);
 }
 
 const styles = {
@@ -77,6 +77,8 @@ const styles = {
 } as const;
 
 export default function WalletPage() {
+  const t = useTranslations('wallet');
+  const locale = useLocale();
   const [balance, setBalance] = useState<number | null>(null);
   const [channel, setChannel] = useState<CheckoutChannel>('pix');
   const [charge, setCharge] = useState<CheckoutResponse | null>(null);
@@ -89,7 +91,7 @@ export default function WalletPage() {
       // told to send it — there is no token for JS to read.
       const res = await fetch(`${API_URL}/api/wallet/balance`, { credentials: 'include' });
       if (res.status === 401) {
-        setStatus('Entre na sua conta para ver o saldo.');
+        setStatus(t('status.signInRequired'));
         return;
       }
       if (!res.ok) throw new Error(String(res.status));
@@ -97,9 +99,9 @@ export default function WalletPage() {
       setBalance(data.balance);
       setStatus('');
     } catch {
-      setStatus('Não foi possível carregar o saldo.');
+      setStatus(t('status.balanceFailed'));
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     void loadBalance();
@@ -108,7 +110,7 @@ export default function WalletPage() {
   async function buy(packId: string) {
     setBusy(true);
     setCharge(null);
-    setStatus('Gerando cobrança…');
+    setStatus(t('status.creatingCharge'));
     try {
       const res = await fetch(`${API_URL}/api/payments/checkout/credits`, {
         method: 'POST',
@@ -118,14 +120,14 @@ export default function WalletPage() {
       });
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };
-        setStatus(body.error ?? 'Não foi possível iniciar o pagamento.');
+        setStatus(body.error ?? t('status.checkoutFailed'));
         return;
       }
       const data = (await res.json()) as CheckoutResponse;
       setCharge(data);
-      setStatus('Cobrança criada. Conclua o pagamento para receber os créditos.');
+      setStatus(t('status.chargeCreated'));
     } catch {
-      setStatus('Não foi possível iniciar o pagamento.');
+      setStatus(t('status.checkoutFailed'));
     } finally {
       setBusy(false);
     }
@@ -134,32 +136,34 @@ export default function WalletPage() {
   return (
     <main style={styles.main}>
       <div style={styles.shell}>
-        <h1 style={{ fontSize: '2rem', margin: 0 }}>Carteira</h1>
+        <h1 style={{ fontSize: '2rem', margin: 0 }}>{t('title')}</h1>
 
         <section style={styles.card} aria-labelledby="balance-heading">
           <h2 id="balance-heading" style={{ margin: '0 0 0.5rem', fontSize: '1.1rem' }}>
-            Saldo de créditos
+            {t('balanceHeading')}
           </h2>
           <p style={{ fontSize: '2.25rem', fontWeight: 700, margin: 0 }}>
             {balance === null ? '—' : balance}
-            <span style={{ fontSize: '1rem', color: '#94a3b8', marginLeft: 8 }}>créditos</span>
+            <span style={{ fontSize: '1rem', color: '#94a3b8', marginLeft: 8 }}>
+              {t('creditsUnit')}
+            </span>
           </p>
           <button
             type="button"
             style={{ ...styles.button, marginTop: '1rem' }}
             onClick={loadBalance}
           >
-            Atualizar saldo
+            {t('refreshBalance')}
           </button>
         </section>
 
         <section style={styles.card} aria-labelledby="packs-heading">
           <h2 id="packs-heading" style={{ margin: '0 0 1rem', fontSize: '1.1rem' }}>
-            Comprar créditos
+            {t('buyHeading')}
           </h2>
 
           <fieldset style={{ border: '1px solid #334155', borderRadius: 8, padding: '0.75rem' }}>
-            <legend style={{ padding: '0 0.4rem', color: '#cbd5e1' }}>Forma de pagamento</legend>
+            <legend style={{ padding: '0 0.4rem', color: '#cbd5e1' }}>{t('paymentMethod')}</legend>
             {CHECKOUT_CHANNELS.map((option) => (
               <label
                 key={option}
@@ -175,7 +179,7 @@ export default function WalletPage() {
                   onChange={() => setChannel(option)}
                   style={{ marginRight: 6 }}
                 />
-                {CHANNEL_LABEL[option]}
+                {t(`channel.${option}`)}
               </label>
             ))}
           </fieldset>
@@ -194,10 +198,16 @@ export default function WalletPage() {
                 }}
               >
                 <span>
-                  <strong>{pack.label}</strong>
+                  <strong>{resolveLabel(pack.label, locale)}</strong>
                   <span style={{ color: '#94a3b8', marginLeft: 8 }}>
-                    {pack.credits} créditos ·{' '}
-                    {formatPrice(pack.price[CHANNEL_CURRENCY[channel]], CHANNEL_CURRENCY[channel])}
+                    {t('packSummary', {
+                      credits: pack.credits,
+                      price: formatPrice(
+                        pack.price[CHANNEL_CURRENCY[channel]],
+                        CHANNEL_CURRENCY[channel],
+                        locale,
+                      ),
+                    })}
                   </span>
                 </span>
                 <button
@@ -205,10 +215,13 @@ export default function WalletPage() {
                   style={{ ...styles.button, opacity: busy ? 0.6 : 1 }}
                   disabled={busy}
                   aria-busy={busy}
-                  aria-label={`Comprar pacote ${pack.label} com ${pack.credits} créditos`}
+                  aria-label={t('buyAria', {
+                    pack: resolveLabel(pack.label, locale),
+                    credits: pack.credits,
+                  })}
                   onClick={() => buy(pack.id)}
                 >
-                  Comprar
+                  {t('buy')}
                 </button>
               </li>
             ))}
@@ -223,7 +236,7 @@ export default function WalletPage() {
         {charge?.payment.method === 'pix' && (
           <section style={styles.card} aria-labelledby="pix-heading">
             <h2 id="pix-heading" style={{ margin: '0 0 0.75rem', fontSize: '1.1rem' }}>
-              Pague com PIX
+              {t('pix.heading')}
             </h2>
             {/* Plain <img>: the QR is a provider-hosted URL on a host we do not
                 know ahead of time, so next/image's remotePatterns cannot cover
@@ -231,14 +244,14 @@ export default function WalletPage() {
             {charge.payment.qrCodeImage && (
               <img
                 src={charge.payment.qrCodeImage}
-                alt="QR Code PIX para pagar esta cobrança"
+                alt={t('pix.qrAlt')}
                 width={220}
                 height={220}
                 style={{ background: '#fff', borderRadius: 8, padding: 8 }}
               />
             )}
             <label htmlFor="brcode" style={{ display: 'block', margin: '0.75rem 0 0.25rem' }}>
-              PIX copia e cola
+              {t('pix.copyPaste')}
             </label>
             <input id="brcode" style={styles.code} readOnly value={charge.payment.brCode} />
           </section>
@@ -247,10 +260,10 @@ export default function WalletPage() {
         {charge?.payment.method === 'crypto' && (
           <section style={styles.card} aria-labelledby="crypto-heading">
             <h2 id="crypto-heading" style={{ margin: '0 0 0.75rem', fontSize: '1.1rem' }}>
-              Pague com cripto
+              {t('crypto.heading')}
             </h2>
             <label htmlFor="pay-address" style={{ display: 'block', marginBottom: '0.25rem' }}>
-              Endereço ({charge.payment.payCurrency.toUpperCase()})
+              {t('crypto.address', { currency: charge.payment.payCurrency.toUpperCase() })}
             </label>
             <input
               id="pay-address"
@@ -259,7 +272,7 @@ export default function WalletPage() {
               value={charge.payment.payAddress}
             />
             <label htmlFor="pay-amount" style={{ display: 'block', margin: '0.75rem 0 0.25rem' }}>
-              Valor a enviar
+              {t('crypto.amount')}
             </label>
             <input id="pay-amount" style={styles.code} readOnly value={charge.payment.payAmount} />
           </section>

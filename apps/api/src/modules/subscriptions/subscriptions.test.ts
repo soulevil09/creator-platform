@@ -17,7 +17,7 @@
 import { createHmac } from 'node:crypto';
 import nock from 'nock';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Emailer } from '../../lib/email.js';
+import { renderRenewalReminderEmail, type Emailer } from '../../lib/email.js';
 import type { ImageProcessor } from '../../lib/image.js';
 import type { PrismaClient } from '../../lib/prisma.js';
 import type { StorageClient } from '../../lib/storage.js';
@@ -52,16 +52,23 @@ function createFakeImages(): ImageProcessor {
   };
 }
 
-/** Records what the renewal sweep tried to send, so the tests can assert on it. */
+/**
+ * Records what the renewal sweep tried to send, so the tests can assert on it.
+ * `rendered` (Session 10) additionally runs the real template layer for the
+ * locale the sweep passed, so the localisation tests see the exact subject and
+ * body a subscriber would — with no Resend client anywhere.
+ */
 function createRecordingEmailer() {
   const reminders: Array<{ to: string; amountCents: number; currency: string }> = [];
+  const rendered: Array<{ to: string; locale: string; subject: string; html: string }> = [];
   const emailer: Emailer = {
     sendVerificationEmail: vi.fn(async () => {}),
-    sendRenewalReminderEmail: vi.fn(async (to, params) => {
+    sendRenewalReminderEmail: vi.fn(async (to, params, locale) => {
       reminders.push({ to, amountCents: params.amountCents, currency: params.currency });
+      rendered.push({ to, locale, ...renderRenewalReminderEmail(params, locale) });
     }),
   };
-  return { emailer, reminders };
+  return { emailer, reminders, rendered };
 }
 
 async function makeApp(prisma: FakePrisma, emailer: Emailer) {
@@ -147,13 +154,14 @@ describe('subscription lifecycle', () => {
   let app: App;
   let emailer: Emailer;
   let reminders: Array<{ to: string; amountCents: number; currency: string }>;
+  let rendered: Array<{ to: string; locale: string; subject: string; html: string }>;
   let modelId: string;
   let subscriberId: string;
   let subCookie: string;
 
   beforeEach(async () => {
     prisma = createFakePrisma();
-    ({ emailer, reminders } = createRecordingEmailer());
+    ({ emailer, reminders, rendered } = createRecordingEmailer());
     app = await makeApp(prisma, emailer);
 
     await loginAs(app, prisma, 'model', 'model@example.com');
@@ -234,6 +242,66 @@ describe('subscription lifecycle', () => {
       expect(prisma.__subscriptions.find((s) => s.id === sub.id)!.status).toBe('ACTIVE');
     });
 
+    // ── Session 10 (D3): the reminder goes out in the subscriber's language ──
+    describe('locale-aware reminder email', () => {
+      /** Set the language through the real write path, not by poking the row. */
+      async function chooseLocale(locale: 'pt-BR' | 'en') {
+        const res = await app.inject({
+          method: 'PATCH',
+          url: '/api/auth/me/locale',
+          cookies: { access_token: subCookie },
+          payload: { locale },
+        });
+        expect(res.statusCode).toBe(200);
+      }
+
+      /** Intl separates symbol and number with U+00A0; normalise for asserts. */
+      const nbsp = (s: string) => s.replace(/\u00a0/g, ' ');
+
+      it('sends the Portuguese template with a comma-decimal amount for preferredLocale pt-BR', async () => {
+        await chooseLocale('pt-BR');
+        seedPaidHistory();
+        seedSubscription(prisma, {
+          subscriberId,
+          modelId,
+          currentPeriodEnd: new Date(Date.now() + 2 * DAY_MS),
+        });
+
+        expectWooviCharge();
+        const res = await runSweep(app);
+        expect(res.json().remindersIssued).toBe(1);
+
+        expect(rendered).toHaveLength(1);
+        expect(rendered[0].to).toBe('sub@example.com');
+        expect(rendered[0].locale).toBe('pt-BR');
+        expect(rendered[0].subject).toBe('Sua assinatura de Test model renova em breve');
+        expect(nbsp(rendered[0].html)).toContain('pague R$ 29,90');
+        expect(rendered[0].html).toContain('Pague com PIX');
+        expect(rendered[0].html).not.toMatch(/renews soon|To keep access/);
+      });
+
+      it('sends the English template with a dot-decimal amount for preferredLocale en', async () => {
+        await chooseLocale('en');
+        seedPaidHistory();
+        seedSubscription(prisma, {
+          subscriberId,
+          modelId,
+          currentPeriodEnd: new Date(Date.now() + 2 * DAY_MS),
+        });
+
+        expectWooviCharge();
+        const res = await runSweep(app);
+        expect(res.json().remindersIssued).toBe(1);
+
+        expect(rendered).toHaveLength(1);
+        expect(rendered[0].locale).toBe('en');
+        expect(rendered[0].subject).toBe('Your Test model subscription renews soon');
+        expect(nbsp(rendered[0].html)).toContain('pay R$29.90');
+        expect(rendered[0].html).toContain('Pay with PIX');
+        expect(rendered[0].html).not.toMatch(/renova em breve|manter o acesso/);
+      });
+    });
+
     it('leaves a subscription well outside the reminder window alone', async () => {
       seedPaidHistory();
       seedSubscription(prisma, {
@@ -270,15 +338,13 @@ describe('subscription lifecycle', () => {
         currentPeriodEnd: new Date(Date.now() + 1 * DAY_MS),
       });
 
-      nock('https://nowpayments.test')
-        .post('/v1/payment')
-        .reply(200, {
-          payment_id: 'np_1',
-          pay_address: 'TXyz',
-          pay_amount: '5.99',
-          pay_currency: 'usdttrc20',
-          payment_status: 'waiting',
-        });
+      nock('https://nowpayments.test').post('/v1/payment').reply(200, {
+        payment_id: 'np_1',
+        pay_address: 'TXyz',
+        pay_amount: '5.99',
+        pay_currency: 'usdttrc20',
+        payment_status: 'waiting',
+      });
 
       const res = await runSweep(app);
       expect(res.json().remindersIssued).toBe(1);
@@ -320,9 +386,7 @@ describe('subscription lifecycle', () => {
       expect(res.json().remindersIssued).toBe(1);
       expect(prisma.__transactions.filter((t) => t.status === 'PENDING')).toHaveLength(1);
       expect(
-        prisma.__auditLogs.some(
-          (l) => l.action === 'subscription.renewal_reminder_email_failed',
-        ),
+        prisma.__auditLogs.some((l) => l.action === 'subscription.renewal_reminder_email_failed'),
       ).toBe(true);
     });
 

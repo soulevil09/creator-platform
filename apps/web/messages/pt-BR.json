@@ -1,0 +1,67 @@
+{
+  "common": {
+    "brand": "VisorFans"
+  },
+  "metadata": {
+    "title": "VisorFans — Plataforma de monetização para criadores de conteúdo",
+    "description": "Atendemos criadores digitais (modelos, influenciadores e artistas) e seus assinantes. Vendemos assinaturas mensais e pacotes de créditos digitais pelo nosso portal web."
+  },
+  "localeSwitcher": {
+    "label": "Idioma",
+    "en": "English",
+    "ptBR": "Português (Brasil)"
+  },
+  "home": {
+    "tagline": "Plataforma de monetização para criadores de conteúdo",
+    "description": "Atendemos criadores digitais (modelos, influenciadores e artistas) e seus assinantes. Vendemos assinaturas mensais e pacotes de créditos digitais pelo nosso portal web.",
+    "comingSoon": "🚧 Em breve — plataforma em desenvolvimento",
+    "copyright": "© {year} {brand}"
+  },
+  "wallet": {
+    "title": "Carteira",
+    "balanceHeading": "Saldo de créditos",
+    "creditsUnit": "créditos",
+    "refreshBalance": "Atualizar saldo",
+    "buyHeading": "Comprar créditos",
+    "paymentMethod": "Forma de pagamento",
+    "channel": {
+      "pix": "PIX (BRL)",
+      "crypto": "Cripto (USD)"
+    },
+    "packSummary": "{credits} créditos · {price}",
+    "buy": "Comprar",
+    "buyAria": "Comprar pacote {pack} com {credits} créditos",
+    "status": {
+      "signInRequired": "Entre na sua conta para ver o saldo.",
+      "balanceFailed": "Não foi possível carregar o saldo.",
+      "creatingCharge": "Gerando cobrança…",
+      "checkoutFailed": "Não foi possível iniciar o pagamento.",
+      "chargeCreated": "Cobrança criada. Conclua o pagamento para receber os créditos."
+    },
+    "pix": {
+      "heading": "Pague com PIX",
+      "qrAlt": "QR Code PIX para pagar esta cobrança",
+      "copyPaste": "PIX copia e cola"
+    },
+    "crypto": {
+      "heading": "Pague com cripto",
+      "address": "Endereço ({currency})",
+      "amount": "Valor a enviar"
+    }
+  },
+  "protectedMedia": {
+    "defaultLabel": "Conteúdo protegido",
+    "obscured": "Conteúdo ocultado enquanto a janela está inativa."
+  },
+  "protectedMediaDemo": {
+    "title": "ProtectedMedia — demo",
+    "intro": "Página de desenvolvimento com <strong>assets fictícios</strong>. Experimente: clique com o botão direito, tente arrastar, troque de aba ou clique fora da janela.",
+    "disclaimer": "Isto é um <strong>dissuasor</strong>, não um controle de segurança: nenhuma página web impede um screenshot do sistema operacional, um gravador de tela ou uma câmera externa. A proteção real é do servidor (marca d'água forense por visualizador + trilha de auditoria); esta camada apenas torna a captura casual mais incômoda e mantém o código de rastreio no quadro.",
+    "imageHeading": "Imagem",
+    "imageLabel": "Imagem de demonstração protegida",
+    "imageAlt": "Gradiente azul-roxo de demonstração",
+    "videoHeading": "Vídeo",
+    "videoNote": "Sem fonte real — apenas o poster. Em produção, a overlay recebe o <code>traceCode</code> que <code>GET /api/content/:id/serve</code> devolve junto da URL assinada.",
+    "videoLabel": "Vídeo de demonstração protegido"
+  }
+}

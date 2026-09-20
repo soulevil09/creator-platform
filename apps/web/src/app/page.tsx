@@ -1,4 +1,11 @@
-export default function HomePage() {
+import { getTranslations } from 'next-intl/server';
+
+export default async function HomePage() {
+  // Server component: translated on the server in the request's locale, so
+  // the first HTML byte is already in the right language.
+  const t = await getTranslations('home');
+  const common = await getTranslations('common');
+
   return (
     <main
       style={{
@@ -23,7 +30,7 @@ export default function HomePage() {
             letterSpacing: '-0.02em',
           }}
         >
-          VisorFans
+          {common('brand')}
         </h1>
 
         <p
@@ -34,7 +41,7 @@ export default function HomePage() {
             marginBottom: '2rem',
           }}
         >
-          Plataforma de monetização para criadores de conteúdo
+          {t('tagline')}
         </p>
 
         <p
@@ -45,9 +52,7 @@ export default function HomePage() {
             margin: 0,
           }}
         >
-          Atendemos criadores digitais (modelos, influenciadores e artistas) e
-          seus assinantes. Vendemos assinaturas mensais e pacotes de créditos
-          digitais pelo nosso portal web.
+          {t('description')}
         </p>
 
         <div
@@ -62,7 +67,7 @@ export default function HomePage() {
             color: '#94a3b8',
           }}
         >
-          🚧 Em breve · Coming soon — plataforma em desenvolvimento
+          {t('comingSoon')}
         </div>
       </section>
 
@@ -73,7 +78,8 @@ export default function HomePage() {
           color: '#64748b',
         }}
       >
-        © {new Date().getFullYear()} VisorFans
+        {/* As a string: ICU would group a number argument ("2.026" in pt-BR). */}
+        {t('copyright', { year: String(new Date().getFullYear()), brand: common('brand') })}
       </footer>
     </main>
   );

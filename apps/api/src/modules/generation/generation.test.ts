@@ -766,7 +766,9 @@ describe('POST /api/generations', () => {
       modelId: model.userId,
       mode: 'PRESET',
       presetId: PRESET.id,
-      userPrompt: PRESET.label,
+      // Session 10: labels are per-locale; `userPrompt` stores the canonical
+      // (English) one — byte-identical to what Session 08 wrote.
+      userPrompt: PRESET.label.en,
       creditsCost: PRESET.creditsCost,
       status: 'COMPLETED',
       providerJobId: 'mock_pred_1',
@@ -791,7 +793,7 @@ describe('POST /api/generations', () => {
       presetId: PRESET.id,
       status: 'COMPLETED',
       creditsCost: PRESET.creditsCost,
-      userPrompt: PRESET.label,
+      userPrompt: PRESET.label.en,
       imageUrl: `https://signed.example/${job.storageKey}?ttl=300`,
       expiresAt: job.expiresAt!.toISOString(),
     });

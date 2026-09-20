@@ -8,7 +8,11 @@
 // point this page at the real API.
 //
 // Not reachable in production: `notFound()` turns it into a 404 there.
+//
+// Strings come from the active locale's catalog (Session 10) — the page is
+// dev-only, but externalising it keeps the "no literal copy" rule uniform.
 import { notFound } from 'next/navigation';
+import { getTranslations } from 'next-intl/server';
 import { ProtectedMedia } from '../../../components/ProtectedMedia';
 
 const PLACEHOLDER_IMAGE =
@@ -55,33 +59,32 @@ const styles = {
   muted: { color: '#94a3b8', fontSize: '0.9rem' },
 } as const;
 
-export default function ProtectedMediaDemoPage() {
+/** Inline markup the demo copy is allowed to use — the catalog names the tags. */
+const rich = {
+  strong: (chunks: React.ReactNode) => <strong>{chunks}</strong>,
+  code: (chunks: React.ReactNode) => <code>{chunks}</code>,
+};
+
+export default async function ProtectedMediaDemoPage() {
   if (process.env.NODE_ENV === 'production') {
     notFound();
   }
 
+  const t = await getTranslations('protectedMediaDemo');
+
   return (
     <main style={styles.main}>
       <div style={styles.shell}>
-        <h1>ProtectedMedia — demo</h1>
-        <p style={styles.muted}>
-          Página de desenvolvimento com <strong>assets fictícios</strong>. Experimente: clique com o
-          botão direito, tente arrastar, troque de aba ou clique fora da janela.
-        </p>
-        <p style={styles.muted}>
-          Isto é um <strong>dissuasor</strong>, não um controle de segurança: nenhuma página web
-          impede um screenshot do sistema operacional, um gravador de tela ou uma câmera externa. A
-          proteção real é do servidor (marca d&apos;água forense por visualizador + trilha de
-          auditoria); esta camada apenas torna a captura casual mais incômoda e mantém o código de
-          rastreio no quadro.
-        </p>
+        <h1>{t('title')}</h1>
+        <p style={styles.muted}>{t.rich('intro', rich)}</p>
+        <p style={styles.muted}>{t.rich('disclaimer', rich)}</p>
 
         <section style={styles.card} aria-labelledby="demo-image-heading">
-          <h2 id="demo-image-heading">Imagem</h2>
-          <ProtectedMedia traceCode={DEMO_IMAGE_TRACE} label="Imagem de demonstração protegida">
+          <h2 id="demo-image-heading">{t('imageHeading')}</h2>
+          <ProtectedMedia traceCode={DEMO_IMAGE_TRACE} label={t('imageLabel')}>
             <img
               src={PLACEHOLDER_IMAGE}
-              alt="Gradiente azul-roxo de demonstração"
+              alt={t('imageAlt')}
               width={480}
               height={300}
               draggable={false}
@@ -91,12 +94,9 @@ export default function ProtectedMediaDemoPage() {
         </section>
 
         <section style={styles.card} aria-labelledby="demo-video-heading">
-          <h2 id="demo-video-heading">Vídeo</h2>
-          <p style={styles.muted}>
-            Sem fonte real — apenas o poster. Em produção, a overlay recebe o <code>traceCode</code>{' '}
-            que <code>GET /api/content/:id/serve</code> devolve junto da URL assinada.
-          </p>
-          <ProtectedMedia traceCode={DEMO_VIDEO_TRACE} label="Vídeo de demonstração protegido">
+          <h2 id="demo-video-heading">{t('videoHeading')}</h2>
+          <p style={styles.muted}>{t.rich('videoNote', rich)}</p>
+          <ProtectedMedia traceCode={DEMO_VIDEO_TRACE} label={t('videoLabel')}>
             {/* `muted`: there is no audio track to caption on a source-less placeholder. */}
             <video
               controls

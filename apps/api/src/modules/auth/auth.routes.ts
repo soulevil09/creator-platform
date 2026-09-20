@@ -4,11 +4,22 @@
 // Tokens are NEVER returned in a response body — only set as httpOnly cookies.
 import { randomBytes } from 'node:crypto';
 import type { FastifyInstance, FastifyPluginOptions, FastifyReply } from 'fastify';
-import type { JwtPayload } from '@creator-platform/shared';
+import {
+  DEFAULT_LOCALE,
+  negotiateLocale,
+  type JwtPayload,
+  type Locale,
+} from '@creator-platform/shared';
 import { env, ACCESS_COOKIE_MAX_AGE, REFRESH_COOKIE_MAX_AGE } from '../../lib/env.js';
 import { authenticate } from '../../middleware/auth.js';
 import { AuthError, type AuthService } from './auth.service.js';
-import { loginSchema, registerSchema, verifyEmailSchema } from './auth.schema.js';
+import {
+  localeSchema,
+  loginSchema,
+  registerSchema,
+  updateLocaleSchema,
+  verifyEmailSchema,
+} from './auth.schema.js';
 
 export interface AuthRoutesOptions extends FastifyPluginOptions {
   service: AuthService;
@@ -39,6 +50,35 @@ function clearSession(reply: FastifyReply): void {
   reply.clearCookie('refresh_token', { path: '/' });
 }
 
+/**
+ * Registration locale (Session 10, D3): explicit body field → `Accept-Language`
+ * → `DEFAULT_LOCALE`. Whatever wins is run through `localeSchema` one more time
+ * before it leaves this function, so the value handed to the service — and
+ * from there to the database and the template map — is always a member of the
+ * hardcoded allowlist, whichever step produced it.
+ */
+function resolveRegistrationLocale(
+  bodyLocale: Locale | undefined,
+  acceptLanguage: string | string[] | undefined,
+): Locale {
+  const header = Array.isArray(acceptLanguage) ? acceptLanguage.join(',') : acceptLanguage;
+  const candidate = bodyLocale ?? negotiateLocale(header) ?? DEFAULT_LOCALE;
+  const parsed = localeSchema.safeParse(candidate);
+  return parsed.success ? parsed.data : DEFAULT_LOCALE;
+}
+
+/**
+ * Keyed on the caller, not the IP — the same write budget as the Session 06.5
+ * cancel/resume endpoints: one NAT must not share a budget, and one account
+ * must not earn a fresh one per IP.
+ */
+const AUTHENTICATED_WRITE_RATE_LIMIT = {
+  max: 20,
+  timeWindow: '1 hour',
+  keyGenerator: (request: { user?: { userId?: string }; ip: string }) =>
+    request.user?.userId ?? request.ip,
+};
+
 export default async function authRoutes(
   app: FastifyInstance,
   opts: AuthRoutesOptions,
@@ -54,8 +94,12 @@ export default async function authRoutes(
       if (!parsed.success) {
         return reply.code(400).send({ error: 'Invalid input', details: parsed.error.flatten() });
       }
+      const locale = resolveRegistrationLocale(
+        parsed.data.locale,
+        request.headers['accept-language'],
+      );
       try {
-        const { userId, role } = await service.register(parsed.data);
+        const { userId, role } = await service.register(parsed.data, locale);
         return reply.code(201).send({ userId, role, message: 'Verification email sent' });
       } catch (err) {
         if (err instanceof AuthError) {
@@ -154,4 +198,27 @@ export default async function authRoutes(
       throw err;
     }
   });
+
+  // ── PATCH /me/locale (authenticated, any role) ────────────────────────────
+  // Strict: anything but an allowlisted locale is a 400, never coerced. The
+  // userId comes from the JWT only.
+  app.patch(
+    '/me/locale',
+    { preHandler: authenticate, config: { rateLimit: AUTHENTICATED_WRITE_RATE_LIMIT } },
+    async (request, reply) => {
+      const parsed = updateLocaleSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: 'Invalid input', details: parsed.error.flatten() });
+      }
+      try {
+        const result = await service.updateLocale(request.user.userId, parsed.data.locale);
+        return reply.code(200).send({ userId: request.user.userId, ...result });
+      } catch (err) {
+        if (err instanceof AuthError) {
+          return reply.code(err.status).send({ error: err.message });
+        }
+        throw err;
+      }
+    },
+  );
 }

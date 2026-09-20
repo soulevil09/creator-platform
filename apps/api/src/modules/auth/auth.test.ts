@@ -22,6 +22,8 @@ interface FakeUser {
   verifyToken: string | null;
   verifyTokenExpiresAt: Date | null;
   refreshTokenHash: string | null;
+  /** Session 10 — mirrors the DB default; allowlisted by Zod on every write. */
+  preferredLocale: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -45,6 +47,7 @@ function createFakePrisma() {
           verifyToken: null,
           verifyTokenExpiresAt: null,
           isVerified: false,
+          preferredLocale: 'pt-BR',
           ...data,
           id: `u_${++seq}`,
           createdAt: now,
@@ -66,10 +69,10 @@ function createFakePrisma() {
 }
 
 function createFakeEmailer() {
-  const sent: Array<{ to: string; token: string }> = [];
+  const sent: Array<{ to: string; token: string; locale: string }> = [];
   const emailer: Emailer = {
-    sendVerificationEmail: vi.fn(async (to: string, token: string) => {
-      sent.push({ to, token });
+    sendVerificationEmail: vi.fn(async (to: string, token: string, locale: string) => {
+      sent.push({ to, token, locale });
     }),
     sendRenewalReminderEmail: vi.fn(async () => {}),
   };
@@ -101,7 +104,7 @@ const validRegister = {
 describe('POST /api/auth/register', () => {
   let prisma: FakePrisma;
   let emailer: Emailer;
-  let sent: Array<{ to: string; token: string }>;
+  let sent: Array<{ to: string; token: string; locale: string }>;
 
   beforeEach(() => {
     prisma = createFakePrisma();
@@ -164,6 +167,126 @@ describe('POST /api/auth/register', () => {
       payload: { ...validRegister, password: 'short' },
     });
     expect(res.statusCode).toBe(400);
+  });
+
+  // ── Session 10: preferredLocale resolution (body → Accept-Language → default)
+  describe('locale', () => {
+    it('persists an explicit body locale and sends the verification email in it', async () => {
+      const app = await makeApp(prisma, emailer);
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/auth/register',
+        headers: { 'accept-language': 'pt-BR' },
+        payload: { ...validRegister, locale: 'en' },
+      });
+      expect(res.statusCode).toBe(201);
+      expect(prisma.__users[0].preferredLocale).toBe('en');
+      expect(sent[0].locale).toBe('en');
+    });
+
+    it('falls back to Accept-Language when the body has no locale', async () => {
+      const app = await makeApp(prisma, emailer);
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/auth/register',
+        headers: { 'accept-language': 'fr-FR,fr;q=0.9,en-GB;q=0.8,pt;q=0.7' },
+        payload: validRegister,
+      });
+      expect(res.statusCode).toBe(201);
+      // `en-GB` (q=0.8) beats `pt` (q=0.7) and resolves by primary subtag.
+      expect(prisma.__users[0].preferredLocale).toBe('en');
+      expect(sent[0].locale).toBe('en');
+    });
+
+    it('falls back to the default when neither the body nor the header names a supported locale', async () => {
+      const app = await makeApp(prisma, emailer);
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/auth/register',
+        headers: { 'accept-language': 'de-DE,de;q=0.9' },
+        payload: validRegister,
+      });
+      expect(res.statusCode).toBe(201);
+      expect(prisma.__users[0].preferredLocale).toBe('pt-BR');
+      expect(sent[0].locale).toBe('pt-BR');
+    });
+
+    it('treats an off-allowlist body locale as absent (falls back, never persists it)', async () => {
+      const app = await makeApp(prisma, emailer);
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/auth/register',
+        headers: { 'accept-language': 'en-US' },
+        payload: { ...validRegister, locale: '../../etc/passwd' },
+      });
+      expect(res.statusCode).toBe(201);
+      expect(prisma.__users[0].preferredLocale).toBe('en');
+      expect(JSON.stringify(prisma.__users[0])).not.toContain('passwd');
+    });
+  });
+});
+
+// ── Session 10: PATCH /api/auth/me/locale ───────────────────────────────────
+describe('PATCH /api/auth/me/locale', () => {
+  async function loggedIn() {
+    const prisma = createFakePrisma();
+    const { emailer } = createFakeEmailer();
+    const app = await makeApp(prisma, emailer);
+    await app.inject({ method: 'POST', url: '/api/auth/register', payload: validRegister });
+    const token = prisma.__users[0].verifyToken!;
+    await app.inject({ method: 'GET', url: `/api/auth/verify-email?token=${token}` });
+    const login = await app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: { email: validRegister.email, password: validRegister.password },
+    });
+    return { prisma, app, accessToken: cookieValue(login, 'access_token')! };
+  }
+
+  it("updates the caller's preferredLocale (200) and /me reflects it", async () => {
+    const { prisma, app, accessToken } = await loggedIn();
+    expect(prisma.__users[0].preferredLocale).toBe('pt-BR');
+
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/api/auth/me/locale',
+      cookies: { access_token: accessToken },
+      payload: { locale: 'en' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ userId: prisma.__users[0].id, preferredLocale: 'en' });
+    expect(prisma.__users[0].preferredLocale).toBe('en');
+
+    const me = await app.inject({
+      method: 'GET',
+      url: '/api/auth/me',
+      cookies: { access_token: accessToken },
+    });
+    expect(me.json().preferredLocale).toBe('en');
+  });
+
+  it('rejects anything off the allowlist with 400 and never coerces', async () => {
+    const { prisma, app, accessToken } = await loggedIn();
+    for (const locale of ['EN', 'pt', 'pt-br', 'fr', '', null, 42, '../en']) {
+      const res = await app.inject({
+        method: 'PATCH',
+        url: '/api/auth/me/locale',
+        cookies: { access_token: accessToken },
+        payload: { locale },
+      });
+      expect(res.statusCode, `locale=${String(locale)}`).toBe(400);
+    }
+    expect(prisma.__users[0].preferredLocale).toBe('pt-BR');
+  });
+
+  it('requires authentication (401)', async () => {
+    const { app } = await loggedIn();
+    const res = await app.inject({
+      method: 'PATCH',
+      url: '/api/auth/me/locale',
+      payload: { locale: 'en' },
+    });
+    expect(res.statusCode).toBe(401);
   });
 });
 
@@ -290,6 +413,9 @@ describe('login flow', () => {
       role: 'model',
       displayName: 'Jane',
       isVerified: true,
+      // Session 10: /me now echoes the persisted locale (default when the
+      // register call sent neither a body locale nor Accept-Language).
+      preferredLocale: 'pt-BR',
     });
   });
 

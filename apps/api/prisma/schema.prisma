@@ -37,6 +37,10 @@
 // on every row precisely so a future session can extend revenue sharing to
 // credit spend without a data migration. The hidden likeness-anchor prompt is
 // never persisted; `userPrompt` holds only the subscriber-supplied text.
+// Session 10 adds `User.preferredLocale` — the language transactional email is
+// sent in. A plain String with a default, not an enum: the allowlist
+// ('pt-BR' | 'en') is enforced with Zod at every write path, so adding a third
+// language later is a code change, not a second enum migration.
 // =============================================================================
 
 generator client {
@@ -74,6 +78,9 @@ model User {
   verifyToken          String?         @unique
   verifyTokenExpiresAt DateTime?
   refreshTokenHash     String?
+  // Language for transactional email (Session 10). Allowlisted by Zod on every
+  // write ('pt-BR' | 'en'); the default matches DEFAULT_LOCALE in shared.
+  preferredLocale      String          @default("pt-BR")
   modelProfile         ModelProfile?
   uploadedContent      Content[]
   contentAccesses      ContentAccess[]

@@ -7,7 +7,7 @@
 // use cost 10 (cheaper, and the token is already high-entropy).
 import { createHash, randomBytes } from 'node:crypto';
 import bcrypt from 'bcryptjs';
-import type { Role } from '@creator-platform/shared';
+import { DEFAULT_LOCALE, isLocale, type Locale, type Role } from '@creator-platform/shared';
 import type { PrismaClient } from '../../lib/prisma.js';
 import type { Emailer } from '../../lib/email.js';
 import type { RegisterInput } from './auth.schema.js';
@@ -59,12 +59,29 @@ export interface MeResult {
   role: Role;
   displayName: string;
   isVerified: boolean;
+  preferredLocale: Locale;
+}
+
+/**
+ * The stored column is a plain String (allowlisted by Zod on every write); a
+ * read still narrows it defensively so a row edited by hand can only ever
+ * surface as the default, never as an arbitrary string.
+ */
+function toApiLocale(value: string): Locale {
+  return isLocale(value) ? value : DEFAULT_LOCALE;
 }
 
 export function createAuthService({ prisma, emailer }: AuthServiceDeps) {
   return {
-    /** Create an unverified account and send the verification email. */
-    async register(input: RegisterInput): Promise<{ userId: string; role: Role }> {
+    /**
+     * Create an unverified account and send the verification email.
+     *
+     * `locale` is resolved by the route (body → Accept-Language → default) and
+     * arrives here already allowlisted; it is persisted as `preferredLocale`
+     * and used for the very first email, so the welcome message is in the
+     * user's language from the start.
+     */
+    async register(input: RegisterInput, locale: Locale): Promise<{ userId: string; role: Role }> {
       const existing = await prisma.user.findUnique({ where: { email: input.email } });
       if (existing) {
         // Duplicate: do not create and do not send an email.
@@ -84,10 +101,11 @@ export function createAuthService({ prisma, emailer }: AuthServiceDeps) {
           isVerified: false,
           verifyToken,
           verifyTokenExpiresAt,
+          preferredLocale: locale,
         },
       });
 
-      await emailer.sendVerificationEmail(user.email, verifyToken);
+      await emailer.sendVerificationEmail(user.email, verifyToken, locale);
 
       return { userId: user.id, role: input.role };
     },
@@ -170,7 +188,25 @@ export function createAuthService({ prisma, emailer }: AuthServiceDeps) {
         role: toApiRole(user.role as PrismaRole),
         displayName: user.displayName,
         isVerified: user.isVerified,
+        preferredLocale: toApiLocale(user.preferredLocale),
       };
+    },
+
+    /**
+     * PATCH /me/locale. The value has already passed `localeSchema` at the
+     * route; this is the only write path for `preferredLocale` after
+     * registration. Scoped by the JWT's userId — never a body field.
+     */
+    async updateLocale(userId: string, locale: Locale): Promise<{ preferredLocale: Locale }> {
+      const user = await prisma.user.findUnique({ where: { id: userId } });
+      if (!user) {
+        throw new AuthError(401, 'Unauthorized');
+      }
+      const updated = await prisma.user.update({
+        where: { id: userId },
+        data: { preferredLocale: locale },
+      });
+      return { preferredLocale: toApiLocale(updated.preferredLocale) };
     },
   };
 }

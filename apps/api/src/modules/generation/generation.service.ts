@@ -35,9 +35,11 @@
 import { createId } from '@paralleldrive/cuid2';
 import { fileTypeFromBuffer } from 'file-type';
 import {
+  CANONICAL_LABEL_LOCALE,
   GENERATION_CUSTOM_PROMPT_COST,
   GENERATION_PRESETS,
   findGenerationPreset,
+  resolveLabel,
   type CreateGenerationResponse,
   type GenerationDetailResponse,
   type GenerationListItem,
@@ -312,7 +314,11 @@ export function createGenerationService({
         }
         creditsCost = preset.creditsCost;
         presetId = preset.id;
-        userPrompt = preset.label;
+        // Session 10: labels are per-locale, but `userPrompt` is a record of
+        // what was requested, not a display string — it stores the CANONICAL
+        // (English) label, byte-identical to what Session 08 persisted, and a
+        // viewer's language is resolved at display time from `presetId`.
+        userPrompt = resolveLabel(preset.label, CANONICAL_LABEL_LOCALE);
         scenePrompt = fragment;
       } else {
         creditsCost = GENERATION_CUSTOM_PROMPT_COST;

@@ -38,6 +38,13 @@ export interface FakeUser {
   verifyToken: string | null;
   verifyTokenExpiresAt: Date | null;
   refreshTokenHash: string | null;
+  /**
+   * Session 10 — allowlisted on every write; `create` and the seed helpers
+   * always set it (mirroring the DB default). Optional in the type only so
+   * pre-Session-10 fixtures that build a user literal by hand stay valid; a
+   * reader treats absence exactly like an unknown value (falls to default).
+   */
+  preferredLocale?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -443,6 +450,7 @@ export function createFakePrisma() {
           verifyToken: null,
           verifyTokenExpiresAt: null,
           isVerified: false,
+          preferredLocale: 'pt-BR',
           ...data,
           id: nextId('u'),
           createdAt: now,
@@ -1354,6 +1362,7 @@ export function seedModel(prisma: FakePrisma, id: string, email: string): FakeUs
     verifyToken: null,
     verifyTokenExpiresAt: null,
     refreshTokenHash: null,
+    preferredLocale: 'pt-BR',
     createdAt: now,
     updatedAt: now,
   };

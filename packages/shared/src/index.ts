@@ -20,6 +20,86 @@ export const SUPPORTED_LOCALES = ['pt-BR', 'en'] as const;
 export type Locale = (typeof SUPPORTED_LOCALES)[number];
 export const DEFAULT_LOCALE: Locale = 'pt-BR';
 
+/**
+ * Cookie the web app's language switcher writes (Session 10). Read by the
+ * server on every request ahead of `Accept-Language`; the value is validated
+ * against `SUPPORTED_LOCALES` before use, so a tampered cookie can only ever
+ * fall through to the next resolution step.
+ */
+export const LOCALE_COOKIE_NAME = 'NEXT_LOCALE';
+
+/**
+ * A catalog label in every supported language (Session 10). `Record<Locale,
+ * string>` rather than a `labelKey`: both the API (emails, provider charge
+ * descriptions, `GenerationJob.userPrompt`) and the web read these labels, and
+ * the API deliberately has no message-catalog runtime — a key would need a
+ * second lookup mechanism there. A record is an in-memory property read on
+ * every hot path, and the type itself enforces key parity: an entry missing a
+ * locale does not compile.
+ */
+export type LocalizedLabel = Readonly<Record<Locale, string>>;
+
+/**
+ * The locale a label is stored under when a *stable* string is needed rather
+ * than a display string — e.g. `GenerationJob.userPrompt` for a preset, which
+ * is a record of what was requested and must not change with the viewer's
+ * language. English, because that is what Sessions 05–08 persisted verbatim,
+ * so pre- and post-Session-10 rows are byte-identical.
+ */
+export const CANONICAL_LABEL_LOCALE: Locale = 'en';
+
+/** Pick one language out of a `LocalizedLabel`. Pure, in-memory. */
+export function resolveLabel(label: LocalizedLabel, locale: Locale): string {
+  return label[locale];
+}
+
+/**
+ * Pick the best supported locale out of an `Accept-Language` header, or
+ * undefined when nothing in it is supported. RFC 9110 §12.5.4 parsing: comma
+ * separated ranges, optional `;q=` weights (default 1, `q=0` = excluded),
+ * highest weight first with header order as the tiebreak. A range matches a
+ * supported locale exactly (case-insensitive) or by its primary subtag, so
+ * `pt`, `pt-PT` and `pt-br` all resolve to `pt-BR` and `en-GB` to `en`.
+ * `*` matches nothing here on purpose — a wildcard is "anything", and the
+ * caller's own default is the honest answer to that.
+ *
+ * The return value is always a member of `SUPPORTED_LOCALES` by construction;
+ * callers still run it through their own Zod allowlist at the entry point
+ * (Session 10, D5) so no locale string reaches a file path, an import path or
+ * a log line unvalidated.
+ */
+export function negotiateLocale(acceptLanguage: string | null | undefined): Locale | undefined {
+  if (!acceptLanguage) return undefined;
+  const ranges = acceptLanguage
+    .split(',')
+    .map((part, index) => {
+      const [rawTag = '', ...params] = part.trim().split(';');
+      const tag = rawTag.trim().toLowerCase();
+      let quality = 1;
+      for (const param of params) {
+        const [key, value] = param.trim().split('=');
+        if (key?.trim().toLowerCase() === 'q' && value !== undefined) {
+          const parsed = Number(value);
+          quality = Number.isFinite(parsed) ? Math.min(Math.max(parsed, 0), 1) : 0;
+        }
+      }
+      return { tag, quality, index };
+    })
+    .filter((range) => range.tag !== '' && range.tag !== '*' && range.quality > 0)
+    .sort((a, b) => b.quality - a.quality || a.index - b.index);
+
+  for (const { tag } of ranges) {
+    const exact = SUPPORTED_LOCALES.find((locale) => locale.toLowerCase() === tag);
+    if (exact) return exact;
+    const primary = tag.split('-')[0];
+    const byPrimary = SUPPORTED_LOCALES.find(
+      (locale) => locale.toLowerCase().split('-')[0] === primary,
+    );
+    if (byPrimary) return byPrimary;
+  }
+  return undefined;
+}
+
 // ─── Roles ───────────────────────────────────────────────────────────────────
 /** Account roles used by RBAC. */
 export const USER_ROLES = ['model', 'subscriber', 'admin'] as const;
@@ -156,26 +236,51 @@ export const SUBSCRIPTION_PERIOD_DAYS = 30;
  */
 export type CatalogPrice = { BRL: number; USD: number };
 
+// `label` is a `LocalizedLabel` (Session 10); `tier` / `id` stay the single
+// stable, non-localized key every other module joins on.
 export const SUBSCRIPTION_PLANS: Record<
   SubscriptionTier,
-  { tier: SubscriptionTier; label: string; price: CatalogPrice }
+  { tier: SubscriptionTier; label: LocalizedLabel; price: CatalogPrice }
 > = {
-  STANDARD: { tier: 'STANDARD', label: 'Standard', price: { BRL: 2990, USD: 599 } },
-  PREMIUM: { tier: 'PREMIUM', label: 'Premium', price: { BRL: 5990, USD: 1199 } },
+  STANDARD: {
+    tier: 'STANDARD',
+    label: { en: 'Standard', 'pt-BR': 'Padrão' },
+    price: { BRL: 2990, USD: 599 },
+  },
+  PREMIUM: {
+    tier: 'PREMIUM',
+    label: { en: 'Premium', 'pt-BR': 'Premium' },
+    price: { BRL: 5990, USD: 1199 },
+  },
 };
 
 /** Credit packs a subscriber can buy. `credits` is the internal currency. */
 export type CreditPack = {
   id: string;
-  label: string;
+  label: LocalizedLabel;
   credits: number;
   price: CatalogPrice;
 };
 
 export const CREDIT_PACKS: readonly CreditPack[] = [
-  { id: 'starter', label: 'Starter', credits: 100, price: { BRL: 1990, USD: 399 } },
-  { id: 'plus', label: 'Plus', credits: 300, price: { BRL: 4990, USD: 999 } },
-  { id: 'pro', label: 'Pro', credits: 1000, price: { BRL: 14990, USD: 2999 } },
+  {
+    id: 'starter',
+    label: { en: 'Starter', 'pt-BR': 'Inicial' },
+    credits: 100,
+    price: { BRL: 1990, USD: 399 },
+  },
+  {
+    id: 'plus',
+    label: { en: 'Plus', 'pt-BR': 'Plus' },
+    credits: 300,
+    price: { BRL: 4990, USD: 999 },
+  },
+  {
+    id: 'pro',
+    label: { en: 'Pro', 'pt-BR': 'Pro' },
+    credits: 1000,
+    price: { BRL: 14990, USD: 2999 },
+  },
 ] as const;
 
 export function findCreditPack(packId: string): CreditPack | undefined {
@@ -465,7 +570,8 @@ export type GenerationStatus = (typeof GENERATION_STATUSES)[number];
  */
 export type GenerationPreset = {
   id: string;
-  label: string;
+  /** Display label per locale (Session 10). `id` is the only stable key. */
+  label: LocalizedLabel;
   creditsCost: number;
 };
 
@@ -473,14 +579,46 @@ export type GenerationPreset = {
 // prompt table can be keyed by them and typecheck fails when the two drift)
 // while still checking every entry against `GenerationPreset`.
 export const GENERATION_PRESETS = [
-  { id: 'hair_long_blonde', label: 'Long blonde hair', creditsCost: 10 },
-  { id: 'hair_short_dark', label: 'Short dark hair', creditsCost: 10 },
-  { id: 'outfit_red_dress', label: 'Red evening dress', creditsCost: 10 },
-  { id: 'outfit_black_lingerie', label: 'Black lingerie', creditsCost: 10 },
-  { id: 'pose_mirror_selfie', label: 'Mirror selfie', creditsCost: 10 },
-  { id: 'pose_lying_on_bed', label: 'Lying on a bed', creditsCost: 10 },
-  { id: 'scene_beach_sunset', label: 'Beach at sunset', creditsCost: 10 },
-  { id: 'scene_neon_city', label: 'Neon city at night', creditsCost: 10 },
+  {
+    id: 'hair_long_blonde',
+    label: { en: 'Long blonde hair', 'pt-BR': 'Cabelo longo loiro' },
+    creditsCost: 10,
+  },
+  {
+    id: 'hair_short_dark',
+    label: { en: 'Short dark hair', 'pt-BR': 'Cabelo curto escuro' },
+    creditsCost: 10,
+  },
+  {
+    id: 'outfit_red_dress',
+    label: { en: 'Red evening dress', 'pt-BR': 'Vestido vermelho de gala' },
+    creditsCost: 10,
+  },
+  {
+    id: 'outfit_black_lingerie',
+    label: { en: 'Black lingerie', 'pt-BR': 'Lingerie preta' },
+    creditsCost: 10,
+  },
+  {
+    id: 'pose_mirror_selfie',
+    label: { en: 'Mirror selfie', 'pt-BR': 'Selfie no espelho' },
+    creditsCost: 10,
+  },
+  {
+    id: 'pose_lying_on_bed',
+    label: { en: 'Lying on a bed', 'pt-BR': 'Deitada na cama' },
+    creditsCost: 10,
+  },
+  {
+    id: 'scene_beach_sunset',
+    label: { en: 'Beach at sunset', 'pt-BR': 'Praia ao pôr do sol' },
+    creditsCost: 10,
+  },
+  {
+    id: 'scene_neon_city',
+    label: { en: 'Neon city at night', 'pt-BR': 'Cidade neon à noite' },
+    creditsCost: 10,
+  },
 ] as const satisfies readonly GenerationPreset[];
 
 export function findGenerationPreset(presetId: string): GenerationPreset | undefined {

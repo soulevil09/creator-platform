@@ -30,6 +30,7 @@ import {
   type CSSProperties,
   type ReactNode,
 } from 'react';
+import { useTranslations } from 'next-intl';
 
 export interface ProtectedMediaProps {
   /**
@@ -40,7 +41,7 @@ export interface ProtectedMediaProps {
   traceCode: string;
   /** The `<img>` or `<video>` (with its own controls) being protected. */
   children: ReactNode;
-  /** Accessible name for the protected region. */
+  /** Accessible name for the protected region; the catalog default if omitted. */
   label?: string;
   className?: string;
   style?: CSSProperties;
@@ -106,10 +107,14 @@ const styles = {
 export function ProtectedMedia({
   traceCode,
   children,
-  label = 'Conteúdo protegido',
+  label,
   className,
   style,
 }: ProtectedMediaProps) {
+  // Both strings this component owns — the region's default name and the
+  // live-region announcement — come from the active locale's catalog
+  // (Session 10), never from a literal.
+  const t = useTranslations('protectedMedia');
   const [obscured, setObscured] = useState(false);
   const contentRef = useRef<HTMLDivElement>(null);
   /** Videos this component paused, so only those are resumed on return. */
@@ -165,7 +170,7 @@ export function ProtectedMedia({
   return (
     <div
       role="group"
-      aria-label={label}
+      aria-label={label ?? t('defaultLabel')}
       className={className}
       style={{ ...styles.wrapper, ...style }}
       data-obscured={obscured ? 'true' : 'false'}
@@ -186,7 +191,7 @@ export function ProtectedMedia({
       </span>
       {/* Tell screen-reader users why the media went away, and when it is back. */}
       <span role="status" style={styles.srOnly}>
-        {obscured ? 'Conteúdo ocultado enquanto a janela está inativa.' : ''}
+        {obscured ? t('obscured') : ''}
       </span>
     </div>
   );

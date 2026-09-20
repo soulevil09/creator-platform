@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .next/
+.next-test/
 .turbo/
 **/generated/
 pnpm-lock.yaml

@@ -39,11 +39,13 @@
 // =============================================================================
 import { createId } from '@paralleldrive/cuid2';
 import {
+  CANONICAL_LABEL_LOCALE,
   CHANNEL_CURRENCY,
   DEFAULT_REVENUE_SHARE_MODEL_PCT,
   SUBSCRIPTION_PERIOD_DAYS,
   SUBSCRIPTION_PLANS,
   findCreditPack,
+  resolveLabel,
   type CheckoutChannel,
   type CheckoutResponse,
   type ContentTier,
@@ -432,7 +434,9 @@ export function createPaymentsService({
       kind: 'subscription',
       amountCents,
       currency,
-      description: `${SUBSCRIPTION_PLANS[params.tier].label} subscription — ${model.displayName}`,
+      // Session 10: the canonical (English) label — this string goes to the
+      // provider as the charge description, unchanged from Session 05.
+      description: `${resolveLabel(SUBSCRIPTION_PLANS[params.tier].label, CANONICAL_LABEL_LOCALE)} subscription — ${model.displayName}`,
       creditsGranted: null,
       modelId: model.id,
       tier: params.tier,
@@ -473,7 +477,7 @@ export function createPaymentsService({
         kind: 'credit_pack',
         amountCents: pack.price[currency],
         currency,
-        description: `${pack.label} credit pack — ${pack.credits} credits`,
+        description: `${resolveLabel(pack.label, CANONICAL_LABEL_LOCALE)} credit pack — ${pack.credits} credits`,
         creditsGranted: pack.credits,
         modelId: null,
         tier: null,

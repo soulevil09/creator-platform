@@ -2,8 +2,23 @@
 //
 // The rest of the app depends only on the `Emailer` interface, so tests inject a
 // fake and Session 13+ can swap providers without touching auth code.
+//
+// ── Localization (Session 10) ───────────────────────────────────────────────
+// Both templates exist in every supported locale as a plain
+// `Record<Locale, …>` map — the same small keyed-map shape as
+// `CHANNEL_CURRENCY`, and deliberately not an i18n runtime: two templates do
+// not justify a dependency. The caller passes the recipient's `preferredLocale`;
+// anything outside the allowlist falls back to `DEFAULT_LOCALE` here rather
+// than indexing the map with an unvalidated string. Every interpolated value in
+// every locale goes through `escapeHtml` — no localized template may skip it.
 import { Resend } from 'resend';
-import type { ChargePayload, SubscriptionTier } from '@creator-platform/shared';
+import {
+  DEFAULT_LOCALE,
+  isLocale,
+  type ChargePayload,
+  type Locale,
+  type SubscriptionTier,
+} from '@creator-platform/shared';
 import { env } from './env.js';
 
 /**
@@ -25,8 +40,12 @@ export interface RenewalReminderParams {
 }
 
 export interface Emailer {
-  sendVerificationEmail(to: string, verifyToken: string): Promise<void>;
-  sendRenewalReminderEmail(to: string, params: RenewalReminderParams): Promise<void>;
+  sendVerificationEmail(to: string, verifyToken: string, locale: Locale): Promise<void>;
+  sendRenewalReminderEmail(
+    to: string,
+    params: RenewalReminderParams,
+    locale: Locale,
+  ): Promise<void>;
 }
 
 function verificationUrl(token: string): string {
@@ -42,57 +61,171 @@ function escapeHtml(value: string): string {
     .replace(/"/g, '&quot;');
 }
 
-/** Minor units → a human amount. Integer arithmetic only. */
-function formatAmount(amountCents: number, currency: string): string {
-  const whole = Math.trunc(amountCents / 100);
-  const fraction = String(Math.abs(amountCents % 100)).padStart(2, '0');
-  return `${currency} ${whole}.${fraction}`;
+/**
+ * Minor units → a locale-formatted currency string: `R$ 29,90` in pt-BR,
+ * `$29.99` in en. Integer input only; the division happens inside the
+ * formatter's own decimal handling, never in a float we then print ourselves.
+ */
+export function formatAmount(amountCents: number, currency: string, locale: Locale): string {
+  return new Intl.NumberFormat(locale, { style: 'currency', currency }).format(amountCents / 100);
 }
 
+/** A calendar date in the recipient's language; UTC so the day never shifts. */
+function formatDate(date: Date, locale: Locale): string {
+  return new Intl.DateTimeFormat(locale, { dateStyle: 'long', timeZone: 'UTC' }).format(date);
+}
+
+/** Only the allowlisted locales index the template map; anything else defaults. */
+function toLocale(locale: string): Locale {
+  return isLocale(locale) ? locale : DEFAULT_LOCALE;
+}
+
+interface EmailTemplates {
+  verification: {
+    subject: string;
+    body(params: { url: string }): string;
+  };
+  renewalReminder: {
+    subject(params: { model: string }): string;
+    body(params: {
+      model: string;
+      tier: string;
+      periodEnd: string;
+      amount: string;
+      instructions: string;
+      manageUrl: string;
+    }): string;
+  };
+  payment: {
+    pix(params: { brCode: string }): string;
+    crypto(params: {
+      amount: string;
+      currency: string;
+      address: string;
+      memo: string | null;
+    }): string;
+    fallback(params: { checkoutUrl: string }): string;
+  };
+}
+
+// Every value handed to these templates is ALREADY escaped by the callers
+// below (`escapeHtml` at the single point where a raw string enters), so the
+// templates themselves only ever interpolate safe strings. Keep it that way:
+// a template must never receive a raw display name, code or address.
+const TEMPLATES: Record<Locale, EmailTemplates> = {
+  en: {
+    verification: {
+      subject: 'Verify your email',
+      body: ({ url }) => `<p>Welcome to Creator Platform.</p>
+<p>Confirm your email address by clicking the link below (valid for 24 hours):</p>
+<p><a href="${url}">${url}</a></p>`,
+    },
+    renewalReminder: {
+      subject: ({ model }) => `Your ${model} subscription renews soon`,
+      body: ({ model, tier, periodEnd, amount, instructions, manageUrl }) =>
+        `<p>Your ${tier} subscription to ${model} ends on ${periodEnd}.</p>
+<p>To keep access, pay ${amount}.</p>
+${instructions}
+<p>Don't want to renew? Cancel any time at <a href="${manageUrl}">${manageUrl}</a> — you keep everything you already paid for until the date above.</p>`,
+    },
+    payment: {
+      pix: ({ brCode }) => `<p>Pay with PIX — copy and paste this code into your bank app:</p>
+<p><code>${brCode}</code></p>`,
+      crypto: ({ amount, currency, address, memo }) =>
+        `<p>Send <strong>${amount} ${currency}</strong> to:</p>
+<p><code>${address}</code></p>${memo ? `<p>Memo/tag: <code>${memo}</code></p>` : ''}`,
+      fallback: ({ checkoutUrl }) => `<p><a href="${checkoutUrl}">Complete your payment</a></p>`,
+    },
+  },
+  'pt-BR': {
+    verification: {
+      subject: 'Confirme seu e-mail',
+      body: ({ url }) => `<p>Bem-vindo(a) à Creator Platform.</p>
+<p>Confirme seu endereço de e-mail clicando no link abaixo (válido por 24 horas):</p>
+<p><a href="${url}">${url}</a></p>`,
+    },
+    renewalReminder: {
+      subject: ({ model }) => `Sua assinatura de ${model} renova em breve`,
+      body: ({ model, tier, periodEnd, amount, instructions, manageUrl }) =>
+        `<p>Sua assinatura ${tier} de ${model} termina em ${periodEnd}.</p>
+<p>Para manter o acesso, pague ${amount}.</p>
+${instructions}
+<p>Não quer renovar? Cancele quando quiser em <a href="${manageUrl}">${manageUrl}</a> — você mantém tudo o que já pagou até a data acima.</p>`,
+    },
+    payment: {
+      pix: ({ brCode }) => `<p>Pague com PIX — copie e cole este código no app do seu banco:</p>
+<p><code>${brCode}</code></p>`,
+      crypto: ({ amount, currency, address, memo }) =>
+        `<p>Envie <strong>${amount} ${currency}</strong> para:</p>
+<p><code>${address}</code></p>${memo ? `<p>Memo/tag: <code>${memo}</code></p>` : ''}`,
+      fallback: ({ checkoutUrl }) => `<p><a href="${checkoutUrl}">Concluir o pagamento</a></p>`,
+    },
+  },
+};
+
 /** How to pay, per instrument. Never includes a credential of ours. */
-function paymentInstructions(payment: ChargePayload): string {
+function paymentInstructions(payment: ChargePayload, t: EmailTemplates): string {
   switch (payment.method) {
     case 'pix':
-      return `<p>Pay with PIX — copy and paste this code into your bank app:</p>
-<p><code>${escapeHtml(payment.brCode)}</code></p>`;
+      return t.payment.pix({ brCode: escapeHtml(payment.brCode) });
     case 'crypto':
-      return `<p>Send <strong>${escapeHtml(payment.payAmount)} ${escapeHtml(payment.payCurrency)}</strong> to:</p>
-<p><code>${escapeHtml(payment.payAddress)}</code></p>${
-        payment.payMemo ? `<p>Memo/tag: <code>${escapeHtml(payment.payMemo)}</code></p>` : ''
-      }`;
+      return t.payment.crypto({
+        amount: escapeHtml(payment.payAmount),
+        currency: escapeHtml(payment.payCurrency),
+        address: escapeHtml(payment.payAddress),
+        memo: payment.payMemo ? escapeHtml(payment.payMemo) : null,
+      });
     default:
-      return `<p><a href="${escapeHtml(payment.checkoutUrl)}">Complete your payment</a></p>`;
+      return t.payment.fallback({ checkoutUrl: escapeHtml(payment.checkoutUrl) });
   }
+}
+
+/**
+ * Render both templates for one locale. Exported so the email suite can assert
+ * on the exact subject/body a locale produces without a Resend client; the
+ * Resend-backed emailer below is a thin transport around it.
+ */
+export function renderVerificationEmail(
+  verifyToken: string,
+  locale: Locale,
+): { subject: string; html: string } {
+  const t = TEMPLATES[toLocale(locale)];
+  const url = escapeHtml(verificationUrl(verifyToken));
+  return { subject: t.verification.subject, html: t.verification.body({ url }) };
+}
+
+export function renderRenewalReminderEmail(
+  params: RenewalReminderParams,
+  locale: Locale,
+): { subject: string; html: string } {
+  const safeLocale = toLocale(locale);
+  const t = TEMPLATES[safeLocale];
+  const model = escapeHtml(params.modelName);
+  return {
+    subject: t.renewalReminder.subject({ model }),
+    html: t.renewalReminder.body({
+      model,
+      tier: escapeHtml(params.tier),
+      periodEnd: escapeHtml(formatDate(params.currentPeriodEnd, safeLocale)),
+      amount: escapeHtml(formatAmount(params.amountCents, params.currency, safeLocale)),
+      instructions: paymentInstructions(params.payment, t),
+      manageUrl: escapeHtml(`${env.APP_URL}/subscriptions`),
+    }),
+  };
 }
 
 /** Real Resend-backed emailer. */
 export function createResendEmailer(apiKey: string = env.EMAIL_API_KEY): Emailer {
   const resend = new Resend(apiKey);
   return {
-    async sendVerificationEmail(to, verifyToken) {
-      const url = verificationUrl(verifyToken);
-      await resend.emails.send({
-        from: env.EMAIL_FROM,
-        to,
-        subject: 'Verify your email',
-        html: `<p>Welcome to Creator Platform.</p>
-<p>Confirm your email address by clicking the link below (valid for 24 hours):</p>
-<p><a href="${url}">${url}</a></p>`,
-      });
+    async sendVerificationEmail(to, verifyToken, locale) {
+      const { subject, html } = renderVerificationEmail(verifyToken, locale);
+      await resend.emails.send({ from: env.EMAIL_FROM, to, subject, html });
     },
 
-    async sendRenewalReminderEmail(to, params) {
-      const model = escapeHtml(params.modelName);
-      await resend.emails.send({
-        from: env.EMAIL_FROM,
-        to,
-        subject: `Your ${model} subscription renews soon`,
-        html: `<p>Your ${escapeHtml(params.tier)} subscription to ${model} ends on
-${params.currentPeriodEnd.toISOString().slice(0, 10)}.</p>
-<p>To keep access, pay ${escapeHtml(formatAmount(params.amountCents, params.currency))}.</p>
-${paymentInstructions(params.payment)}
-<p>Don't want to renew? Cancel any time at <a href="${env.APP_URL}/subscriptions">${env.APP_URL}/subscriptions</a> — you keep everything you already paid for until the date above.</p>`,
-      });
+    async sendRenewalReminderEmail(to, params, locale) {
+      const { subject, html } = renderRenewalReminderEmail(params, locale);
+      await resend.emails.send({ from: env.EMAIL_FROM, to, subject, html });
     },
   };
 }

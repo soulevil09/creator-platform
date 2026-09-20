@@ -44,7 +44,9 @@
 // admin/model reporting — they are honest, but nothing gates on them.
 // =============================================================================
 import {
+  DEFAULT_LOCALE,
   channelForCurrency,
+  isLocale,
   type MySubscriptionsResponse,
   type SubscriptionListItem,
   type SubscriptionRenewalRunSummary,
@@ -243,14 +245,21 @@ export function createSubscriptionsService({
     // the subscriber can still pay from the app, and tomorrow's run finds the
     // charge outstanding and does not issue a second one.
     try {
-      await emailer.sendRenewalReminderEmail(subscriber.email, {
-        modelName: issued.modelDisplayName,
-        tier: row.tier as SubscriptionTier,
-        amountCents: issued.checkout.amount,
-        currency: issued.checkout.currency,
-        currentPeriodEnd: row.currentPeriodEnd,
-        payment: issued.checkout.payment,
-      });
+      await emailer.sendRenewalReminderEmail(
+        subscriber.email,
+        {
+          modelName: issued.modelDisplayName,
+          tier: row.tier as SubscriptionTier,
+          amountCents: issued.checkout.amount,
+          currency: issued.checkout.currency,
+          currentPeriodEnd: row.currentPeriodEnd,
+          payment: issued.checkout.payment,
+        },
+        // Session 10: the reminder goes out in the language the subscriber
+        // chose. The column is Zod-allowlisted on write; the read is narrowed
+        // again here so a hand-edited row can only ever fall to the default.
+        isLocale(subscriber.preferredLocale) ? subscriber.preferredLocale : DEFAULT_LOCALE,
+      );
     } catch (err) {
       await prisma.auditLog.create({
         data: {
