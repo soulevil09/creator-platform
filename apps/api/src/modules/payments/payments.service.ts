@@ -424,6 +424,14 @@ export function createPaymentsService({
     if (!profile) {
       throw new PaymentError(409, 'This model is not accepting subscriptions yet');
     }
+    // Session 11: a model takes money only after an admin has approved them —
+    // in addition to the profile above and the subscriber's own `isVerified`
+    // check in `loadCustomer`. Same machine code as the upload gate. The
+    // renewal sweep goes through this seam too, so a model rejected after
+    // acquiring subscribers stops being re-charged for (audited by the sweep).
+    if (profile.approvalStatus !== 'APPROVED') {
+      throw new PaymentError(403, 'model_not_approved');
+    }
 
     const currency = CHANNEL_CURRENCY[params.provider];
     const amountCents = SUBSCRIPTION_PLANS[params.tier].price[currency];

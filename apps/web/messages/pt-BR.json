@@ -63,5 +63,173 @@
     "videoHeading": "Vídeo",
     "videoNote": "Sem fonte real — apenas o poster. Em produção, a overlay recebe o <code>traceCode</code> que <code>GET /api/content/:id/serve</code> devolve junto da URL assinada.",
     "videoLabel": "Vídeo de demonstração protegido"
+  },
+  "admin": {
+    "title": "Console administrativo",
+    "nav": {
+      "label": "Seções administrativas",
+      "overview": "Visão geral",
+      "models": "Aprovação de modelos",
+      "users": "Usuários",
+      "payouts": "Repasses",
+      "reports": "Denúncias"
+    },
+    "gate": {
+      "checking": "Verificando seu acesso…",
+      "redirecting": "Acesso administrativo necessário. Redirecionando…",
+      "failed": "Não foi possível verificar seu acesso."
+    },
+    "common": {
+      "loading": "Carregando…",
+      "loadFailed": "Não foi possível carregar esta seção.",
+      "actionFailed": "A ação falhou: {error}",
+      "empty": "Nada por aqui no momento.",
+      "previous": "Página anterior",
+      "next": "Próxima página",
+      "pageInfo": "{from}–{to} de {total}",
+      "refresh": "Atualizar",
+      "cancel": "Cancelar",
+      "confirm": "Confirmar",
+      "statusFilter": "Status",
+      "yes": "Sim",
+      "no": "Não",
+      "none": "—"
+    },
+    "overview": {
+      "heading": "Visão geral",
+      "window": "Os números transacionais cobrem os últimos {days} dias.",
+      "generatedAt": "Gerado em {when}",
+      "subscribers": "Assinantes ativos",
+      "subscriptions": "Assinaturas ativas",
+      "byTier": "{tier}: {count}",
+      "recurring": "Receita recorrente estimada",
+      "recurringNote": "Por moeda — nunca somada entre moedas.",
+      "recurringRow": "{amount} de {count} assinaturas",
+      "unattributed": "{count} assinaturas no adaptador simulado (offline) não estão atribuídas a uma moeda.",
+      "creditPacks": "Receita de pacotes de créditos",
+      "generations": "Gerações",
+      "generationsSummary": "{total} no total · {completed} concluídas · {failed} com falha · {pending} pendentes",
+      "completionRate": "Taxa de conclusão: {rate}",
+      "completionRateNone": "Taxa de conclusão: ainda sem jobs finalizados",
+      "payouts": "Repasses",
+      "payoutRow": "{status} · {currency}: {amount} ({count})",
+      "noDestination": "{count} modelos acima do limite de {threshold} não têm e-mail de repasse configurado."
+    },
+    "models": {
+      "heading": "Aprovação de modelos",
+      "intro": "Modelos começam como pendentes e não podem enviar conteúdo nem receber assinantes até serem aprovados.",
+      "filter": {
+        "pending": "Pendentes",
+        "approved": "Aprovados",
+        "rejected": "Rejeitados",
+        "all": "Todos"
+      },
+      "status": {
+        "PENDING": "Pendente",
+        "APPROVED": "Aprovado",
+        "REJECTED": "Rejeitado"
+      },
+      "emailVerified": "E-mail verificado",
+      "aiConsent": "Consentimento de semelhança por IA",
+      "tos": "Termos aceitos",
+      "country": "País",
+      "currency": "Moeda",
+      "joined": "Perfil criado em",
+      "reviewedAt": "Revisado em",
+      "rejectionReason": "Motivo da rejeição",
+      "referenceImages": "Imagens de referência",
+      "noReferenceImages": "Nenhuma imagem de referência enviada ainda.",
+      "referenceImageAlt": "Foto de referência {n} de {name}",
+      "approve": "Aprovar",
+      "approvePrompt": "Aprovar {name}? A pessoa poderá enviar conteúdo e receber assinantes imediatamente.",
+      "reject": "Rejeitar",
+      "rejectPrompt": "Rejeitar {name}? O motivo é registrado e exibido para a pessoa.",
+      "reasonLabel": "Motivo (obrigatório)",
+      "approved": "{name} aprovado(a).",
+      "rejected": "{name} rejeitado(a)."
+    },
+    "users": {
+      "heading": "Usuários",
+      "search": "Buscar por e-mail",
+      "searchPlaceholder": "nome@exemplo.com",
+      "roleFilter": "Papel",
+      "anyRole": "Qualquer papel",
+      "role": {
+        "admin": "Admin",
+        "model": "Modelo",
+        "subscriber": "Assinante"
+      },
+      "columns": {
+        "email": "E-mail",
+        "displayName": "Nome",
+        "role": "Papel",
+        "verified": "Verificado",
+        "status": "Status",
+        "createdAt": "Cadastro",
+        "actions": "Ações"
+      },
+      "active": "Ativo",
+      "suspended": "Suspenso em {when}",
+      "suspend": "Suspender",
+      "suspendPrompt": "Suspender {email}? A sessão será encerrada na próxima renovação e o login ficará bloqueado até a reativação.",
+      "suspendReason": "Motivo (opcional)",
+      "reinstate": "Reativar",
+      "reinstatePrompt": "Reativar {email}? O login voltará a funcionar imediatamente.",
+      "adminProtected": "Administradores não podem ser suspensos.",
+      "suspendedDone": "{email} suspenso(a).",
+      "reinstatedDone": "{email} reativado(a)."
+    },
+    "payouts": {
+      "heading": "Repasses",
+      "intro": "As execuções semanais são disparadas pelo cron às segundas-feiras. Uma execução manual paga agora todos os modelos acima do limite.",
+      "runNow": "Executar repasses agora",
+      "runPrompt": "Iniciar uma execução de repasses agora? Todos os modelos acima do limite com e-mail de repasse serão pagos pelo provedor. Isso fica registrado na sua conta.",
+      "runDone": "Execução concluída: {processed} pagos, {skipped} ignorados, {failed} com falha, {total} no total.",
+      "columns": {
+        "payoutId": "Repasse",
+        "modelId": "Modelo",
+        "amount": "Valor",
+        "status": "Status",
+        "provider": "Provedor",
+        "period": "Período",
+        "createdAt": "Criado em",
+        "failureReason": "Motivo da falha"
+      }
+    },
+    "reports": {
+      "heading": "Denúncias de conteúdo",
+      "intro": "Denúncias feitas por quem visualiza. Resolver registra sua decisão; despublicar usa o mesmo mecanismo que um modelo usa.",
+      "filter": {
+        "pending": "Pendentes",
+        "resolved": "Resolvidas",
+        "dismissed": "Descartadas",
+        "all": "Todas"
+      },
+      "reason": {
+        "SPAM": "Spam",
+        "ILLEGAL": "Conteúdo ilegal",
+        "NON_CONSENSUAL": "Não consensual",
+        "OTHER": "Outro"
+      },
+      "details": "Detalhes",
+      "noDetails": "Nenhum detalhe informado.",
+      "reportedBy": "Denunciado por {email} em {when}",
+      "content": "Conteúdo",
+      "owner": "Autor(a)",
+      "published": "Publicado",
+      "unpublished": "Despublicado",
+      "deleted": "Excluído",
+      "ownerSuspended": "Autor(a) suspenso(a)",
+      "resolvedAs": "Resolvida em {when} como {action}",
+      "actionLabel": "Resolução",
+      "action": {
+        "none": "Nenhuma ação",
+        "unpublish": "Despublicar o conteúdo",
+        "unpublish_and_suspend_model": "Despublicar e suspender o modelo"
+      },
+      "resolve": "Resolver",
+      "resolvePrompt": "Resolver esta denúncia com “{action}”? Isso não pode ser desfeito.",
+      "resolvedDone": "Denúncia resolvida."
+    }
   }
 }

@@ -789,3 +789,213 @@ export type PayoutDetailResponse = PayoutListItem & {
   /** How many PaymentTransaction rows this payout settled. */
   transactionCount: number;
 };
+
+// ─── Admin console (Session 11) ─────────────────────────────────────────────
+/**
+ * Whether an admin has cleared a model to monetize (upload content, accept
+ * subscribers). Separate from email verification — `User.isVerified` proves an
+ * inbox, this records a human decision.
+ */
+export const MODEL_APPROVAL_STATUSES = ['PENDING', 'APPROVED', 'REJECTED'] as const;
+export type ModelApprovalStatus = (typeof MODEL_APPROVAL_STATUSES)[number];
+
+/** Query filter for the approval queue; `all` lifts the status filter. */
+export const ADMIN_MODEL_STATUS_FILTERS = ['pending', 'approved', 'rejected', 'all'] as const;
+export type AdminModelStatusFilter = (typeof ADMIN_MODEL_STATUS_FILTERS)[number];
+
+export const REPORT_REASONS = ['SPAM', 'ILLEGAL', 'NON_CONSENSUAL', 'OTHER'] as const;
+export type ReportReason = (typeof REPORT_REASONS)[number];
+
+export const REPORT_STATUSES = ['PENDING', 'RESOLVED', 'DISMISSED'] as const;
+export type ReportStatus = (typeof REPORT_STATUSES)[number];
+
+/** Query filter for the moderation queue; `all` lifts the status filter. */
+export const ADMIN_REPORT_STATUS_FILTERS = ['pending', 'resolved', 'dismissed', 'all'] as const;
+export type AdminReportStatusFilter = (typeof ADMIN_REPORT_STATUS_FILTERS)[number];
+
+/** What an admin chose when resolving a report. Persisted as `Report.resolvedAction`. */
+export const REPORT_RESOLVE_ACTIONS = ['none', 'unpublish', 'unpublish_and_suspend_model'] as const;
+export type ReportResolveAction = (typeof REPORT_RESOLVE_ACTIONS)[number];
+
+/** Window the metrics overview aggregates transactional figures over. */
+export const ADMIN_METRICS_WINDOW_DAYS = 30;
+
+/** Generic offset pagination envelope for the admin listings. */
+export type AdminPage<T> = {
+  items: T[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+/** One row in GET /api/admin/users. Never carries a hash of any kind. */
+export type AdminUserListItem = {
+  id: string;
+  email: string;
+  role: Role;
+  isVerified: boolean;
+  displayName: string;
+  /** Non-null while the account is locked out (Session 11, D2). */
+  suspendedAt: string | null;
+  createdAt: string;
+};
+
+/** GET /api/admin/users/:userId — list row plus role-specific rollups. */
+export type AdminUserDetail = AdminUserListItem & {
+  /** Present when `role === 'model'` and a profile exists. */
+  model: {
+    profileId: string;
+    approvalStatus: ModelApprovalStatus;
+    approvalReviewedAt: string | null;
+    approvalRejectionReason: string | null;
+    payoutEmailConfigured: boolean;
+  } | null;
+  /** Present when `role === 'subscriber'`. Read-only rollups. */
+  subscriber: {
+    activeSubscriptions: number;
+    walletBalance: number;
+  } | null;
+};
+
+/** One entry in the approval queue: the profile plus what the admin can look at. */
+export type AdminModelListItem = {
+  userId: string;
+  email: string;
+  isVerified: boolean;
+  suspendedAt: string | null;
+  profile: {
+    profileId: string;
+    displayName: string;
+    bio: string | null;
+    country: string;
+    currency: Currency;
+    aiConsent: boolean;
+    tosAcceptedAt: string | null;
+    approvalStatus: ModelApprovalStatus;
+    approvalReviewedAt: string | null;
+    approvalRejectionReason: string | null;
+    createdAt: string;
+  };
+  /** Short-TTL signed URLs (300 s), minted per request — never persisted. */
+  referenceImages: ReferenceImageItem[];
+};
+
+/** POST /api/admin/models/:userId/approve | /reject. */
+export type AdminModelDecisionResponse = {
+  userId: string;
+  approvalStatus: ModelApprovalStatus;
+  approvalReviewedAt: string | null;
+  approvalRejectionReason: string | null;
+  /** False when the call was an idempotent no-op (no audit row written). */
+  changed: boolean;
+};
+
+/** POST /api/admin/users/:userId/suspend | /reinstate. */
+export type AdminSuspendResponse = {
+  userId: string;
+  suspendedAt: string | null;
+  changed: boolean;
+};
+
+/** Per-currency figure — the response never sums across currencies. */
+export type AdminCurrencyTotal = {
+  currency: Currency;
+  amountCents: number;
+};
+
+/** GET /api/admin/metrics/overview. */
+export type AdminMetricsOverview = {
+  generatedAt: string;
+  windowDays: number;
+  subscribers: {
+    /** Distinct subscribers holding at least one ACTIVE subscription. */
+    active: number;
+  };
+  subscriptions: {
+    active: { total: number; byTier: Record<SubscriptionTier, number> };
+  };
+  /**
+   * Sum of each ACTIVE subscription's catalog price, bucketed by the currency
+   * its adapter settles in. Subscriptions whose adapter has no fixed settlement
+   * currency (the offline mock) are counted in `unattributedSubscriptions`
+   * rather than folded into any bucket.
+   */
+  recurringRevenue: {
+    byCurrency: Array<AdminCurrencyTotal & { subscriptions: number }>;
+    unattributedSubscriptions: number;
+  };
+  /** CONFIRMED CREDIT_PACK transactions in the window, by currency. */
+  creditPackRevenue: {
+    byCurrency: AdminCurrencyTotal[];
+  };
+  /** GenerationJob rows created in the window. */
+  generations: {
+    total: number;
+    completed: number;
+    failed: number;
+    pending: number;
+    /** completed / (completed + failed); null when nothing has settled. */
+    completionRate: number | null;
+  };
+  payouts: {
+    /** PENDING / PROCESSING / COMPLETED payouts, by status and currency. */
+    byStatus: Array<AdminCurrencyTotal & { status: PayoutRecordStatus; count: number }>;
+    /** Models whose unpaid balance clears the threshold but who have set no payout email. */
+    modelsAboveThresholdWithoutPayoutEmail: number;
+    thresholdCents: number;
+  };
+};
+
+/** POST /api/content/:contentId/report. */
+export type ReportContentRequest = {
+  reason: ReportReason;
+  details?: string;
+};
+
+export type ReportContentResponse = {
+  reportId: string;
+  contentId: string;
+  status: ReportStatus;
+  createdAt: string;
+};
+
+/** One row in GET /api/admin/reports, with the reported item and its owner joined. */
+export type AdminReportListItem = {
+  reportId: string;
+  reason: ReportReason;
+  details: string | null;
+  status: ReportStatus;
+  resolvedAction: ReportResolveAction | null;
+  resolvedAt: string | null;
+  createdAt: string;
+  reporter: { userId: string; email: string; displayName: string };
+  content: {
+    contentId: string;
+    title: string;
+    type: ContentType;
+    tier: ContentTier;
+    isPublished: boolean;
+    deletedAt: string | null;
+    owner: { userId: string; email: string; displayName: string; suspendedAt: string | null };
+  };
+};
+
+/** POST /api/admin/reports/:reportId/resolve. */
+export type AdminResolveReportRequest = {
+  action: ReportResolveAction;
+};
+
+export type AdminResolveReportResponse = {
+  reportId: string;
+  status: ReportStatus;
+  resolvedAction: ReportResolveAction;
+  resolvedAt: string;
+  contentUnpublished: boolean;
+  modelSuspended: boolean;
+};
+
+/**
+ * Who triggered a payout run. Both entry points drive the same service
+ * function; the audit row records which one it was.
+ */
+export type PayoutRunTrigger = { source: 'cron' } | { source: 'admin'; actorId: string };

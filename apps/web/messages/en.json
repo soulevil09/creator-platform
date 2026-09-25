@@ -63,5 +63,173 @@
     "videoHeading": "Video",
     "videoNote": "No real source — poster only. In production the overlay receives the <code>traceCode</code> that <code>GET /api/content/:id/serve</code> returns alongside the signed URL.",
     "videoLabel": "Protected demo video"
+  },
+  "admin": {
+    "title": "Admin console",
+    "nav": {
+      "label": "Admin sections",
+      "overview": "Overview",
+      "models": "Model approvals",
+      "users": "Users",
+      "payouts": "Payouts",
+      "reports": "Reports"
+    },
+    "gate": {
+      "checking": "Checking your access…",
+      "redirecting": "Admin access required. Redirecting…",
+      "failed": "Could not verify your access."
+    },
+    "common": {
+      "loading": "Loading…",
+      "loadFailed": "Could not load this section.",
+      "actionFailed": "The action failed: {error}",
+      "empty": "Nothing here right now.",
+      "previous": "Previous page",
+      "next": "Next page",
+      "pageInfo": "{from}–{to} of {total}",
+      "refresh": "Refresh",
+      "cancel": "Cancel",
+      "confirm": "Confirm",
+      "statusFilter": "Status",
+      "yes": "Yes",
+      "no": "No",
+      "none": "—"
+    },
+    "overview": {
+      "heading": "Overview",
+      "window": "Transactional figures cover the last {days} days.",
+      "generatedAt": "Generated {when}",
+      "subscribers": "Active subscribers",
+      "subscriptions": "Active subscriptions",
+      "byTier": "{tier}: {count}",
+      "recurring": "Estimated recurring revenue",
+      "recurringNote": "Per currency — never summed across currencies.",
+      "recurringRow": "{amount} from {count} subscriptions",
+      "unattributed": "{count} subscriptions on the offline mock adapter are not attributed to a currency.",
+      "creditPacks": "Credit-pack revenue",
+      "generations": "Generations",
+      "generationsSummary": "{total} total · {completed} completed · {failed} failed · {pending} pending",
+      "completionRate": "Completion rate: {rate}",
+      "completionRateNone": "Completion rate: no settled jobs yet",
+      "payouts": "Payouts",
+      "payoutRow": "{status} · {currency}: {amount} ({count})",
+      "noDestination": "{count} models above the {threshold} threshold have no payout email set."
+    },
+    "models": {
+      "heading": "Model approvals",
+      "intro": "Models start pending and cannot upload or take subscribers until approved.",
+      "filter": {
+        "pending": "Pending",
+        "approved": "Approved",
+        "rejected": "Rejected",
+        "all": "All"
+      },
+      "status": {
+        "PENDING": "Pending",
+        "APPROVED": "Approved",
+        "REJECTED": "Rejected"
+      },
+      "emailVerified": "Email verified",
+      "aiConsent": "AI likeness consent",
+      "tos": "Terms accepted",
+      "country": "Country",
+      "currency": "Currency",
+      "joined": "Profile created",
+      "reviewedAt": "Reviewed",
+      "rejectionReason": "Rejection reason",
+      "referenceImages": "Reference images",
+      "noReferenceImages": "No reference images uploaded yet.",
+      "referenceImageAlt": "Reference photo {n} for {name}",
+      "approve": "Approve",
+      "approvePrompt": "Approve {name}? They will be able to upload content and accept subscribers immediately.",
+      "reject": "Reject",
+      "rejectPrompt": "Reject {name}? The reason is recorded and shown to them.",
+      "reasonLabel": "Reason (required)",
+      "approved": "{name} approved.",
+      "rejected": "{name} rejected."
+    },
+    "users": {
+      "heading": "Users",
+      "search": "Search by email",
+      "searchPlaceholder": "name@example.com",
+      "roleFilter": "Role",
+      "anyRole": "Any role",
+      "role": {
+        "admin": "Admin",
+        "model": "Model",
+        "subscriber": "Subscriber"
+      },
+      "columns": {
+        "email": "Email",
+        "displayName": "Name",
+        "role": "Role",
+        "verified": "Verified",
+        "status": "Status",
+        "createdAt": "Joined",
+        "actions": "Actions"
+      },
+      "active": "Active",
+      "suspended": "Suspended {when}",
+      "suspend": "Suspend",
+      "suspendPrompt": "Suspend {email}? They will be signed out at their next refresh and cannot log in until reinstated.",
+      "suspendReason": "Reason (optional)",
+      "reinstate": "Reinstate",
+      "reinstatePrompt": "Reinstate {email}? They will be able to log in again immediately.",
+      "adminProtected": "Admins cannot be suspended.",
+      "suspendedDone": "{email} suspended.",
+      "reinstatedDone": "{email} reinstated."
+    },
+    "payouts": {
+      "heading": "Payouts",
+      "intro": "Weekly runs are triggered by the cron job on Mondays. A manual run pays every model above the threshold now.",
+      "runNow": "Run payouts now",
+      "runPrompt": "Start a payout run now? Every model above the threshold with a payout email will be paid through the provider. This is recorded under your account.",
+      "runDone": "Run finished: {processed} paid, {skipped} skipped, {failed} failed, {total} in total.",
+      "columns": {
+        "payoutId": "Payout",
+        "modelId": "Model",
+        "amount": "Amount",
+        "status": "Status",
+        "provider": "Provider",
+        "period": "Period",
+        "createdAt": "Created",
+        "failureReason": "Failure reason"
+      }
+    },
+    "reports": {
+      "heading": "Content reports",
+      "intro": "Reports filed by viewers. Resolving records your decision; unpublishing goes through the same toggle a model uses.",
+      "filter": {
+        "pending": "Pending",
+        "resolved": "Resolved",
+        "dismissed": "Dismissed",
+        "all": "All"
+      },
+      "reason": {
+        "SPAM": "Spam",
+        "ILLEGAL": "Illegal content",
+        "NON_CONSENSUAL": "Non-consensual",
+        "OTHER": "Other"
+      },
+      "details": "Details",
+      "noDetails": "No details provided.",
+      "reportedBy": "Reported by {email} on {when}",
+      "content": "Content",
+      "owner": "Owner",
+      "published": "Published",
+      "unpublished": "Unpublished",
+      "deleted": "Deleted",
+      "ownerSuspended": "Owner suspended",
+      "resolvedAs": "Resolved {when} as {action}",
+      "actionLabel": "Resolution",
+      "action": {
+        "none": "No action",
+        "unpublish": "Unpublish the content",
+        "unpublish_and_suspend_model": "Unpublish and suspend the model"
+      },
+      "resolve": "Resolve",
+      "resolvePrompt": "Resolve this report with “{action}”? This cannot be undone.",
+      "resolvedDone": "Report resolved."
+    }
   }
 }

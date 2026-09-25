@@ -125,8 +125,9 @@ export function createAuthService({ prisma, emailer }: AuthServiceDeps) {
 
     /**
      * Validate login credentials. Order matters: we confirm the password before
-     * revealing the "not verified" state, so an attacker can't probe which
-     * emails are registered-but-unverified without the password.
+     * revealing the "not verified" or "suspended" state, so an attacker can't
+     * probe which emails are registered-but-unverified (or locked out by an
+     * admin) without the password.
      */
     async validateCredentials(
       email: string,
@@ -139,6 +140,12 @@ export function createAuthService({ prisma, emailer }: AuthServiceDeps) {
       const ok = await bcrypt.compare(password, user.passwordHash);
       if (!ok) {
         throw new AuthError(401, 'Invalid credentials');
+      }
+      // Session 11: an admin lock-out is honoured here and on refresh — the
+      // two places a session is minted — and nowhere else, so there is one
+      // check to reason about. A machine code, so a UI can tell it apart.
+      if (user.suspendedAt) {
+        throw new AuthError(403, 'account_suspended');
       }
       if (!user.isVerified) {
         throw new AuthError(403, 'Email not verified');
@@ -158,7 +165,10 @@ export function createAuthService({ prisma, emailer }: AuthServiceDeps) {
 
     /**
      * Confirm a presented refresh token matches the stored hash. Throws 401 if
-     * the user is gone, was logged out (hash null), or the token doesn't match.
+     * the user is gone, was logged out (hash null), or the token doesn't match;
+     * 403 `account_suspended` if an admin has locked the account since the
+     * token was issued (Session 11) — an existing session cannot outlive a
+     * suspension by more than one access-token lifetime.
      */
     async assertRefreshTokenValid(userId: string, presentedToken: string): Promise<void> {
       const user = await prisma.user.findUnique({ where: { id: userId } });
@@ -168,6 +178,9 @@ export function createAuthService({ prisma, emailer }: AuthServiceDeps) {
       const ok = await bcrypt.compare(digestToken(presentedToken), user.refreshTokenHash);
       if (!ok) {
         throw new AuthError(401, 'Invalid refresh token');
+      }
+      if (user.suspendedAt) {
+        throw new AuthError(403, 'account_suspended');
       }
     },
 

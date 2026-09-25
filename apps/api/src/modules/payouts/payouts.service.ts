@@ -53,6 +53,7 @@ import {
   type PayoutProviderName,
   type PayoutRecordStatus,
   type PayoutRunSummary,
+  type PayoutRunTrigger,
 } from '@creator-platform/shared';
 import type { PrismaClient } from '../../lib/prisma.js';
 import type { PrismaTransactionClient } from '../wallet/wallet.service.js';
@@ -457,11 +458,20 @@ export function createPayoutsService({
     },
 
     /**
-     * POST /run — the weekly job. Models are processed in small batches via
-     * `Promise.allSettled` so one slow or failing provider call neither stalls
-     * the run nor takes the rest of it down.
+     * The payout run — grouping, threshold, chunked claim-and-send. This is
+     * the one implementation behind both entry points (Session 11, D4): the
+     * cron-secret route (`POST /api/payouts/run`, `trigger.source = 'cron'`)
+     * and the admin's on-demand `POST /api/admin/payouts/run`
+     * (`source = 'admin'`, with the admin's id). The two differ only in who
+     * is allowed to call, and the summary audit row records which one did.
+     * Models are processed in small batches via `Promise.allSettled` so one
+     * slow or failing provider call neither stalls the run nor takes the
+     * rest of it down.
      */
-    async runPayouts(now: Date = new Date()): Promise<PayoutRunSummary> {
+    async runPayouts(
+      trigger: PayoutRunTrigger = { source: 'cron' },
+      now: Date = new Date(),
+    ): Promise<PayoutRunSummary> {
       const provider = getProvider();
       const period = {
         start: new Date(now.getTime() - PAYOUT_PERIOD_DAYS * 24 * 60 * 60 * 1000),
@@ -520,11 +530,13 @@ export function createPayoutsService({
 
       await prisma.auditLog.create({
         data: {
-          actorId: null,
+          // The cron has no user; an admin-triggered run names the admin.
+          actorId: trigger.source === 'admin' ? trigger.actorId : null,
           action: 'payout.run_completed',
           entity: 'PayoutRun',
           entityId: `run_${period.end.toISOString()}`,
           metadata: {
+            triggeredBy: trigger.source,
             provider: provider.name,
             periodStart: period.start.toISOString(),
             periodEnd: period.end.toISOString(),

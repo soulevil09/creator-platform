@@ -12,6 +12,8 @@ import type {
   ContentTier,
   ContentType,
   ContentUploadResponse,
+  ReportContentResponse,
+  ReportReason,
 } from '@creator-platform/shared';
 import type { Role } from '@creator-platform/shared';
 import type { PrismaClient } from '../../lib/prisma.js';
@@ -181,7 +183,9 @@ export function createContentService({
     /**
      * Upload one content item. The caller (routes) has already magic-byte
      * validated the file and enforced size caps. Requires a verified model with
-     * a profile. Detects image dimensions; never persists the watermark.
+     * a profile that an admin has APPROVED (Session 11 — email verification
+     * alone no longer unlocks monetization). Detects image dimensions; never
+     * persists the watermark.
      */
     async upload(
       userId: string,
@@ -195,6 +199,11 @@ export function createContentService({
       const profile = await prisma.modelProfile.findUnique({ where: { userId } });
       if (!profile) {
         throw new ContentError(403, 'Model profile required before uploading content');
+      }
+      // Same 403 shape as the two gates above, with a machine code so a UI can
+      // tell "verify your email" from "an admin has not approved you yet".
+      if (profile.approvalStatus !== 'APPROVED') {
+        throw new ContentError(403, 'model_not_approved');
       }
 
       let width: number | null = null;
@@ -233,17 +242,23 @@ export function createContentService({
       };
     },
 
-    /** Publish/unpublish the model's own content (403 if not the owner). */
+    /**
+     * Publish/unpublish content. A model may only toggle their own (403
+     * otherwise); an admin may toggle anyone's — this is the moderation
+     * unpublish lever (Session 11, D5), and the report-resolution path calls
+     * this same function rather than a second unpublish implementation.
+     */
     async setPublish(
       userId: string,
       contentId: string,
       publish: boolean,
+      role: Role = 'model',
     ): Promise<{ contentId: string; isPublished: boolean }> {
       const content = await prisma.content.findUnique({ where: { id: contentId } });
       if (!content || content.deletedAt) {
         throw new ContentError(404, 'Content not found');
       }
-      if (content.modelId !== userId) {
+      if (role !== 'admin' && content.modelId !== userId) {
         throw new ContentError(403, 'Forbidden');
       }
       const updated = await prisma.content.update({
@@ -384,6 +399,65 @@ export function createContentService({
         content.mimeType,
       );
       return { kind: 'image', buffer: watermarked, mimeType: content.mimeType };
+    },
+
+    /**
+     * Flag a content item for moderation (Session 11, D5). Any authenticated
+     * user may report anything that exists and is not deleted — whoever can
+     * see a listing can report it. The partial unique index
+     * (`Report_one_pending_per_reporter_content`) is the only guard against a
+     * duplicate: a second report while the first is still PENDING rejects at
+     * the database and is answered as a 200 no-op with the existing row, so a
+     * flood of repeats never becomes a pile of rows. Once resolved, the same
+     * viewer may report the item again.
+     */
+    async reportContent(
+      reporterId: string,
+      contentId: string,
+      input: { reason: ReportReason; details?: string },
+    ): Promise<{ report: ReportContentResponse; created: boolean }> {
+      const content = await prisma.content.findUnique({ where: { id: contentId } });
+      if (!content || content.deletedAt) {
+        throw new ContentError(404, 'Content not found');
+      }
+
+      const toResponse = (row: {
+        id: string;
+        contentId: string;
+        status: string;
+        createdAt: Date;
+      }): ReportContentResponse => ({
+        reportId: row.id,
+        contentId: row.contentId,
+        status: row.status as ReportContentResponse['status'],
+        createdAt: iso(row.createdAt),
+      });
+
+      try {
+        const row = await prisma.report.create({
+          data: {
+            contentId,
+            reporterId,
+            reason: input.reason,
+            details: input.details ?? null,
+          },
+        });
+        return { report: toResponse(row), created: true };
+      } catch (err) {
+        if ((err as { code?: string }).code !== 'P2002') throw err;
+      }
+
+      // The index refused it: there is already a PENDING report from this
+      // viewer on this item. Return that one, unchanged.
+      const existing = await prisma.report.findFirst({
+        where: { contentId, reporterId, status: 'PENDING' },
+      });
+      if (!existing) {
+        // The pending row resolved between the failed insert and this read;
+        // the caller can simply retry. Vanishingly rare, and never a 500.
+        throw new ContentError(409, 'report_conflict');
+      }
+      return { report: toResponse(existing), created: false };
     },
 
     /**

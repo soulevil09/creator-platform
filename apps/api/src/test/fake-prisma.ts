@@ -45,19 +45,55 @@ export interface FakeUser {
    * reader treats absence exactly like an unknown value (falls to default).
    */
   preferredLocale?: string;
+  /**
+   * Session 11 — admin lock-out. Optional in the type so pre-Session-11
+   * fixtures that build a user literal by hand stay valid; every reader treats
+   * absence as "not suspended", exactly like the column's null default.
+   */
+  suspendedAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
+
+export type FakeApprovalStatus = 'PENDING' | 'APPROVED' | 'REJECTED';
 
 export interface FakeProfile {
   id: string;
   userId: string;
   displayName: string;
+  bio?: string | null;
+  country?: string;
+  currency?: string;
   /** Session 03 likeness opt-in; Session 08 reads it live on every generation. */
   aiConsent: boolean;
+  tosAcceptedAt?: Date | null;
   /** Paxum destination address; null until the model sets one. UNIQUE. */
   payoutEmail: string | null;
+  /**
+   * Session 11 — the admin's decision. `seedProfile` defaults to APPROVED so
+   * every pre-Session-11 fixture still represents a model who may monetize;
+   * the approval tests seed PENDING explicitly.
+   */
+  approvalStatus: FakeApprovalStatus;
+  approvalReviewedAt: Date | null;
+  approvalRejectionReason: string | null;
+  createdAt?: Date;
   updatedAt: Date;
+}
+
+export type FakeReportReason = 'SPAM' | 'ILLEGAL' | 'NON_CONSENSUAL' | 'OTHER';
+export type FakeReportStatus = 'PENDING' | 'RESOLVED' | 'DISMISSED';
+
+export interface FakeReport {
+  id: string;
+  contentId: string;
+  reporterId: string;
+  reason: FakeReportReason;
+  details: string | null;
+  status: FakeReportStatus;
+  resolvedAction: string | null;
+  resolvedAt: Date | null;
+  createdAt: Date;
 }
 
 export interface FakeReferenceImage {
@@ -259,6 +295,7 @@ export function createFakePrisma() {
   const messages: FakeMessage[] = [];
   const referenceImages: FakeReferenceImage[] = [];
   const generationJobs: FakeGenerationJob[] = [];
+  const reports: FakeReport[] = [];
   /**
    * Per-delegate-method call counter. The conversation list must stay O(1) in
    * queries however many conversations a user has, and the only honest way to
@@ -376,9 +413,21 @@ export function createFakePrisma() {
           lte?: Date | string;
           gt?: Date | string;
           gte?: Date | string;
+          contains?: string;
+          mode?: 'default' | 'insensitive';
         };
         if (Array.isArray(op.in) && !op.in.includes(value)) return false;
         if ('not' in op && value === op.not) return false;
+        // The admin user search: `email: { contains, mode: 'insensitive' }`.
+        if (op.contains !== undefined) {
+          const haystack = String(value);
+          const needle = op.contains;
+          const hit =
+            op.mode === 'insensitive'
+              ? haystack.toLowerCase().includes(needle.toLowerCase())
+              : haystack.includes(needle);
+          if (!hit) return false;
+        }
         // Dates compare by instant, strings (the id keyset cursor) lexically.
         const cmp = (bound: unknown) => {
           const a = value instanceof Date ? value.getTime() : (value as string);
@@ -432,6 +481,45 @@ export function createFakePrisma() {
     return args.take === undefined ? out : out.slice(0, args.take);
   };
 
+  /**
+   * Prisma `groupBy` as the admin metrics (Session 11) and the payout run
+   * issue it: `by` any columns, `_count: { _all }` and `_sum` over numeric
+   * columns. A `_sum` over only-null values is null, as in Postgres.
+   */
+  const groupRows = <T extends object>(
+    rows: T[],
+    args: { by: string[]; where?: Where; _count?: unknown; _sum?: Record<string, boolean> },
+    matches: (row: T, where: Where) => boolean = (row, where) => rowMatches(row, where),
+  ) => {
+    const matched = args.where ? rows.filter((row) => matches(row, args.where!)) : rows;
+    const groups = new Map<string, { key: Record<string, unknown>; rows: T[] }>();
+    for (const row of matched) {
+      const record = row as Record<string, unknown>;
+      const key: Record<string, unknown> = {};
+      for (const field of args.by) key[field] = record[field];
+      const id = JSON.stringify(args.by.map((field) => key[field] ?? null));
+      const group = groups.get(id) ?? { key, rows: [] };
+      group.rows.push(row);
+      groups.set(id, group);
+    }
+    return [...groups.values()].map(({ key, rows: members }) => ({
+      ...key,
+      ...(args._sum
+        ? {
+            _sum: Object.fromEntries(
+              Object.keys(args._sum).map((field) => {
+                const values = members
+                  .map((row) => (row as Record<string, unknown>)[field])
+                  .filter((v): v is number => typeof v === 'number');
+                return [field, values.length === 0 ? null : values.reduce((a, b) => a + b, 0)];
+              }),
+            ),
+          }
+        : {}),
+      ...(args._count ? { _count: { _all: members.length } } : {}),
+    }));
+  };
+
   const findTx = (where: Where): FakeTransaction | undefined => {
     if (where.id !== undefined) return transactions.find((t) => t.id === where.id);
     if (where.idempotencyKey !== undefined)
@@ -451,6 +539,7 @@ export function createFakePrisma() {
           verifyTokenExpiresAt: null,
           isVerified: false,
           preferredLocale: 'pt-BR',
+          suspendedAt: null,
           ...data,
           id: nextId('u'),
           createdAt: now,
@@ -465,6 +554,29 @@ export function createFakePrisma() {
         Object.assign(user, data, { updatedAt: new Date() });
         return user;
       },
+      /** The admin user listing (Session 11): role/email filters, paged. `select` is ignored. */
+      findMany: async ({
+        where = {},
+        ...page
+      }: {
+        where?: Where;
+        orderBy?: Record<string, 'asc' | 'desc'>;
+        skip?: number;
+        take?: number;
+        select?: unknown;
+      } = {}) => {
+        track('user.findMany');
+        const rows = paginate(
+          users.filter((u) => rowMatches(u, where)),
+          { orderBy: page.orderBy },
+        );
+        const skip = page.skip ?? 0;
+        return rows.slice(skip, page.take === undefined ? undefined : skip + page.take);
+      },
+      count: async ({ where = {} }: { where?: Where } = {}) => {
+        track('user.count');
+        return users.filter((u) => rowMatches(u, where)).length;
+      },
     },
 
     modelProfile: {
@@ -475,6 +587,50 @@ export function createFakePrisma() {
             (where.id !== undefined && p.id === where.id) ||
             (where.payoutEmail !== undefined && p.payoutEmail === where.payoutEmail),
         ) ?? null,
+      /**
+       * The approval queue (Session 11): filtered by `approvalStatus`, paged,
+       * with the owning user and the reference images joined in.
+       */
+      findMany: async ({
+        where = {},
+        include,
+        ...page
+      }: {
+        where?: Where;
+        orderBy?: Record<string, 'asc' | 'desc'>;
+        skip?: number;
+        take?: number;
+        include?: { user?: unknown; referenceImages?: unknown };
+      } = {}) => {
+        track('modelProfile.findMany');
+        const rows = paginate(
+          profiles.filter((p) => rowMatches(p, where)),
+          { orderBy: page.orderBy },
+        );
+        const skip = page.skip ?? 0;
+        const slice = rows.slice(skip, page.take === undefined ? undefined : skip + page.take);
+        return slice.map((row) => ({
+          bio: null,
+          country: 'BR',
+          currency: 'BRL',
+          tosAcceptedAt: null,
+          createdAt: row.updatedAt,
+          ...row,
+          ...(include?.user ? { user: users.find((u) => u.id === row.userId) ?? null } : {}),
+          ...(include?.referenceImages
+            ? {
+                referenceImages: referenceImages
+                  .filter((img) => img.modelProfileId === row.id)
+                  .slice()
+                  .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime()),
+              }
+            : {}),
+        }));
+      },
+      count: async ({ where = {} }: { where?: Where } = {}) => {
+        track('modelProfile.count');
+        return profiles.filter((p) => rowMatches(p, where)).length;
+      },
       update: async ({
         where,
         data,
@@ -517,6 +673,25 @@ export function createFakePrisma() {
           content.filter((c) => rowMatches(c, where)),
           page,
         );
+      },
+      /** The upload path (Session 11's approval-gate test drives it end to end). */
+      create: async ({ data }: { data: Partial<FakeContent> & { modelId: string } }) => {
+        track('content.create');
+        const row: FakeContent = {
+          title: 'Untitled',
+          type: 'IMAGE',
+          tier: 'STANDARD',
+          storageKey: null,
+          mimeType: 'image/jpeg',
+          isPublished: false,
+          viewCount: 0,
+          deletedAt: null,
+          ...data,
+          id: nextId('c'),
+          createdAt: new Date(Date.now() + ++seq),
+        };
+        content.push(row);
+        return row;
       },
       /** The fire-and-forget viewCount bump the serve path issues. */
       update: async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
@@ -692,17 +867,13 @@ export function createFakePrisma() {
           },
         };
       },
-      /** Only the `by: ['modelId'] + _sum` shape the payout run uses. */
-      groupBy: async ({ where }: { by: string[]; where?: Where; _sum?: unknown }) => {
-        const matched = transactions.filter((t) => (where ? txMatches(t, where) : true));
-        const totals = new Map<string | null, number>();
-        for (const row of matched) {
-          totals.set(row.modelId, (totals.get(row.modelId) ?? 0) + (row.modelShareCents ?? 0));
-        }
-        return [...totals].map(([modelId, sum]) => ({
-          modelId,
-          _sum: { modelShareCents: sum },
-        }));
+      /**
+       * The payout run's `by: ['modelId'] + _sum: { modelShareCents }` and the
+       * admin metrics' `by: ['currency'] + _sum: { amount }` (Session 11).
+       */
+      groupBy: async (args: { by: string[]; where?: Where; _sum?: Record<string, boolean> }) => {
+        track('paymentTransaction.groupBy');
+        return groupRows(transactions, args);
       },
     },
 
@@ -754,6 +925,16 @@ export function createFakePrisma() {
         const matched = payouts.filter((p) => payoutMatches(p, where));
         for (const row of matched) Object.assign(row, data);
         return { count: matched.length };
+      },
+      /** Admin metrics (Session 11): totals by (status, currency). */
+      groupBy: async (args: {
+        by: string[];
+        where?: Where;
+        _sum?: Record<string, boolean>;
+        _count?: unknown;
+      }) => {
+        track('payout.groupBy');
+        return groupRows(payouts, args);
       },
     },
 
@@ -828,6 +1009,15 @@ export function createFakePrisma() {
         const matched = subscriptions.filter((sub) => subMatches(sub, where));
         for (const row of matched) Object.assign(row, data, { updatedAt: new Date() });
         return { count: matched.length };
+      },
+      count: async ({ where = {} }: { where?: Where } = {}) => {
+        track('subscription.count');
+        return subscriptions.filter((sub) => subMatches(sub, where)).length;
+      },
+      /** Admin metrics (Session 11): active subscribers, and actives by (tier, provider). */
+      groupBy: async (args: { by: string[]; where?: Where; _count?: unknown }) => {
+        track('subscription.groupBy');
+        return groupRows(subscriptions, args, subMatches);
       },
     },
 
@@ -1147,6 +1337,99 @@ export function createFakePrisma() {
         for (const row of matched) Object.assign(row, data, { updatedAt: new Date() });
         return { count: matched.length };
       },
+      /** Admin metrics (Session 11): volume by status over the window. */
+      groupBy: async (args: { by: string[]; where?: Where; _count?: unknown }) => {
+        track('generationJob.groupBy');
+        return groupRows(generationJobs, args, jobMatches);
+      },
+    },
+
+    // ── Moderation (Session 11) ──────────────────────────────────────────────
+    report: {
+      create: async ({
+        data,
+      }: {
+        data: Partial<FakeReport> & { contentId: string; reporterId: string };
+      }) => {
+        track('report.create');
+        // The partial unique index from the migration: one PENDING report per
+        // (content, reporter). Enforced here exactly as Postgres would, so the
+        // service's P2002 → 200-no-op mapping is exercised, not assumed.
+        const status = data.status ?? 'PENDING';
+        if (
+          status === 'PENDING' &&
+          reports.some(
+            (r) =>
+              r.contentId === data.contentId &&
+              r.reporterId === data.reporterId &&
+              r.status === 'PENDING',
+          )
+        ) {
+          throw new FakeUniqueConstraintError('Report_one_pending_per_reporter_content');
+        }
+        const row: FakeReport = {
+          reason: 'OTHER',
+          details: null,
+          resolvedAction: null,
+          resolvedAt: null,
+          ...data,
+          id: nextId('rep'),
+          status,
+          createdAt: new Date(Date.now() + ++seq),
+        };
+        reports.push(row);
+        return row;
+      },
+      findUnique: async ({ where }: { where: { id: string } }) => {
+        track('report.findUnique');
+        return reports.find((r) => r.id === where.id) ?? null;
+      },
+      findFirst: async ({ where }: { where: Where }) => {
+        track('report.findFirst');
+        return reports.find((r) => rowMatches(r, where)) ?? null;
+      },
+      /** The moderation queue: filtered, paged, reporter + content + owner joined. */
+      findMany: async ({
+        where = {},
+        include,
+        ...page
+      }: {
+        where?: Where;
+        orderBy?: Record<string, 'asc' | 'desc'>;
+        skip?: number;
+        take?: number;
+        include?: unknown;
+      } = {}) => {
+        track('report.findMany');
+        const rows = paginate(
+          reports.filter((r) => rowMatches(r, where)),
+          { orderBy: page.orderBy },
+        );
+        const skip = page.skip ?? 0;
+        const slice = rows.slice(skip, page.take === undefined ? undefined : skip + page.take);
+        if (!include) return slice;
+        return slice.map((row) => {
+          const item = content.find((c) => c.id === row.contentId) ?? null;
+          return {
+            ...row,
+            reporter: users.find((u) => u.id === row.reporterId) ?? null,
+            content: item
+              ? { ...item, model: users.find((u) => u.id === item.modelId) ?? null }
+              : null,
+          };
+        });
+      },
+      count: async ({ where = {} }: { where?: Where } = {}) => {
+        track('report.count');
+        return reports.filter((r) => rowMatches(r, where)).length;
+      },
+      /** The resolve claim: `WHERE id = ? AND status = 'PENDING'`, compare-and-set. */
+      updateMany: async ({ where, data }: { where: Where; data: Record<string, unknown> }) => {
+        track('report.updateMany');
+        const matched = reports.filter((r) => rowMatches(r, where));
+        for (const row of matched) Object.assign(row, data);
+        return { count: matched.length };
+      },
     },
 
     /** Interactive transaction: runs the callback against this same client. */
@@ -1166,6 +1449,7 @@ export function createFakePrisma() {
     __messages: messages,
     __referenceImages: referenceImages,
     __generationJobs: generationJobs,
+    __reports: reports,
     /** Per-delegate call counts, for the "no N+1" assertions. */
     __calls: calls,
     __resetCalls: () => {
@@ -1190,15 +1474,36 @@ export function seedProfile(
   prisma: FakePrisma,
   userId: string,
   payoutEmail?: string,
-  overrides: Partial<Pick<FakeProfile, 'displayName' | 'aiConsent'>> = {},
+  overrides: Partial<
+    Pick<
+      FakeProfile,
+      | 'displayName'
+      | 'aiConsent'
+      | 'approvalStatus'
+      | 'approvalReviewedAt'
+      | 'approvalRejectionReason'
+      | 'bio'
+      | 'country'
+      | 'currency'
+      | 'tosAcceptedAt'
+      | 'createdAt'
+    >
+  > = {},
 ): FakeProfile {
+  const now = new Date(Date.now() + prisma.__profiles.length);
   const row: FakeProfile = {
     id: `mp_${userId}`,
     userId,
     displayName: `Model ${userId}`,
     aiConsent: false,
     payoutEmail: payoutEmail ?? null,
-    updatedAt: new Date(),
+    // APPROVED by default: every pre-Session-11 fixture is a model who may
+    // monetize. The approval tests seed PENDING/REJECTED explicitly.
+    approvalStatus: 'APPROVED',
+    approvalReviewedAt: null,
+    approvalRejectionReason: null,
+    createdAt: now,
+    updatedAt: now,
     ...overrides,
   };
   prisma.__profiles.push(row);
@@ -1363,6 +1668,7 @@ export function seedModel(prisma: FakePrisma, id: string, email: string): FakeUs
     verifyTokenExpiresAt: null,
     refreshTokenHash: null,
     preferredLocale: 'pt-BR',
+    suspendedAt: null,
     createdAt: now,
     updatedAt: now,
   };

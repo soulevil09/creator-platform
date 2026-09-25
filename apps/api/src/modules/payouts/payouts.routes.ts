@@ -7,9 +7,10 @@
 // password. There is also no admin auth or dashboard yet — that is Session 11.
 // A shared secret in a header is the honest fit: it authenticates the *caller*
 // (a machine) rather than pretending a user is present, it is comparable in
-// constant time, and it can be rotated in one GitHub secret. When Session 11
-// lands an admin identity, a manually triggered run can sit behind the JWT and
-// this endpoint stays what it is: the machine entrance.
+// constant time, and it can be rotated in one GitHub secret. Session 11 added
+// the admin entrance (`POST /api/admin/payouts/run`, behind the admin JWT);
+// both call the same `runPayouts`, and this endpoint stays what it is: the
+// machine entrance.
 //
 // The secret is compared with `crypto.timingSafeEqual`, never `===`, and the
 // check runs before any database access, so a wrong secret costs one buffer
@@ -138,7 +139,7 @@ export default async function payoutRoutes(
     },
     async (_request, reply) => {
       try {
-        const summary = await service.runPayouts();
+        const summary = await service.runPayouts({ source: 'cron' });
         return reply.code(200).send(summary);
       } catch (err) {
         return sendError(reply, err);

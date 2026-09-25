@@ -55,6 +55,8 @@ import type { IAIProvider } from './modules/generation/provider.interface.js';
 import { createTraceRecorder } from './modules/protection/trace.js';
 import { createStorageCleanupService } from './modules/storage-cleanup/storage-cleanup.service.js';
 import storageCleanupRoutes from './modules/storage-cleanup/storage-cleanup.routes.js';
+import { createAdminService } from './modules/admin/admin.service.js';
+import adminRoutes from './modules/admin/admin.routes.js';
 
 /** Max reference-image upload size, shared by the multipart limit (10 MB). */
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
@@ -289,6 +291,21 @@ export async function buildServer(opts: BuildServerOptions = {}) {
     prefix: '/api/admin/storage',
     service: storageCleanupService,
   });
+
+  // ── Admin console (Session 11) ────────────────────────────────────────────
+  // Every route behind `authenticate` + `authorize('admin')`. The service
+  // reuses the existing seams rather than re-implementing them: Session 04's
+  // publish toggle (the moderation unpublish lever) and Session 06's payout
+  // run (the on-demand "run now"), both handed in here.
+  const adminService = createAdminService({
+    prisma,
+    storage,
+    bucket: env.STORAGE_BUCKET,
+    setPublish: contentService.setPublish,
+    runPayouts: payoutsService.runPayouts,
+    payoutMinThresholdCents: env.PAYOUT_MIN_THRESHOLD_CENTS,
+  });
+  await app.register(adminRoutes, { prefix: '/api/admin', service: adminService });
 
   return app;
 }

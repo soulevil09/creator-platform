@@ -14,7 +14,12 @@ import type {
 } from 'fastify';
 import { authenticate, authorize } from '../../middleware/auth.js';
 import { ContentError, type ContentService } from './content.service.js';
-import { listQuerySchema, publishSchema, uploadMetadataSchema } from './content.schema.js';
+import {
+  listQuerySchema,
+  publishSchema,
+  reportContentSchema,
+  uploadMetadataSchema,
+} from './content.schema.js';
 
 export interface ContentRoutesOptions extends FastifyPluginOptions {
   service: ContentService;
@@ -55,6 +60,19 @@ async function optionalAuthenticate(request: FastifyRequest): Promise<void> {
 }
 
 const modelOnly = { preHandler: [authenticate, authorize('model')] };
+
+/**
+ * Report flooding is itself a harassment vector, so the budget is per caller
+ * (the JWT's userId), not per IP. Attached as a route-level preHandler AFTER
+ * `authenticate` (via `app.rateLimit()`, Session 11) rather than through
+ * `config.rateLimit`: the config form runs at `onRequest`, before the cookie
+ * has been verified, where `request.user` is still unset.
+ */
+const REPORT_RATE_LIMIT = {
+  max: 10,
+  timeWindow: '1 hour',
+  keyGenerator: (request: FastifyRequest) => request.user?.userId ?? request.ip,
+};
 
 export default async function contentRoutes(
   app: FastifyInstance,
@@ -157,10 +175,13 @@ export default async function contentRoutes(
     },
   );
 
-  // ── PATCH /:contentId/publish ─────────────────────────────────────────────
+  // ── PATCH /:contentId/publish (model: own content; admin: any) ────────────
+  // Session 11 opened this to admins as the moderation unpublish lever. The
+  // ownership check is bypassed for the admin role inside the service, and
+  // nowhere else.
   app.patch<{ Params: { contentId: string } }>(
     '/:contentId/publish',
-    { ...modelOnly },
+    { preHandler: [authenticate, authorize('model', 'admin')] },
     async (request, reply) => {
       const parsed = publishSchema.safeParse(request.body);
       if (!parsed.success) {
@@ -171,8 +192,33 @@ export default async function contentRoutes(
           request.user.userId,
           request.params.contentId,
           parsed.data.publish,
+          request.user.role,
         );
         return reply.code(200).send(result);
+      } catch (err) {
+        return sendError(reply, err);
+      }
+    },
+  );
+
+  // ── POST /:contentId/report (any authenticated user) ──────────────────────
+  // 201 on a new report, 200 (same row) while one from this caller is still
+  // pending — the partial unique index decides, not an application check.
+  app.post<{ Params: { contentId: string } }>(
+    '/:contentId/report',
+    { preHandler: [authenticate, app.rateLimit(REPORT_RATE_LIMIT)] },
+    async (request, reply) => {
+      const parsed = reportContentSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: 'Invalid input', details: parsed.error.flatten() });
+      }
+      try {
+        const { report, created } = await service.reportContent(
+          request.user.userId,
+          request.params.contentId,
+          parsed.data,
+        );
+        return reply.code(created ? 201 : 200).send(report);
       } catch (err) {
         return sendError(reply, err);
       }

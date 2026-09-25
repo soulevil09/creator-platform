@@ -5,7 +5,7 @@
 // approach used by auth/onboarding). The publish and list schemas validate JSON
 // body / query strings respectively.
 import { z } from 'zod';
-import { CONTENT_TIERS, CONTENT_TYPES } from '@creator-platform/shared';
+import { CONTENT_TIERS, CONTENT_TYPES, REPORT_REASONS } from '@creator-platform/shared';
 
 /** Metadata accompanying an upload (the file itself is validated separately). */
 export const uploadMetadataSchema = z.object({
@@ -33,3 +33,18 @@ export const listQuerySchema = z.object({
   tier: z.enum(CONTENT_TIERS).optional(),
 });
 export type ListQueryInput = z.infer<typeof listQuerySchema>;
+
+/**
+ * POST /:contentId/report (Session 11). `details` is free text, stored
+ * verbatim and HTML-escaped wherever it is rendered — never interpolated raw.
+ */
+export const reportContentSchema = z.object({
+  reason: z.enum(REPORT_REASONS),
+  details: z
+    .string()
+    .trim()
+    .max(2000, 'details max 2000 chars')
+    .optional()
+    .transform((v) => (v === '' || v === undefined ? undefined : v)),
+});
+export type ReportContentInput = z.infer<typeof reportContentSchema>;

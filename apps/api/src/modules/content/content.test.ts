@@ -31,6 +31,8 @@ interface FakeUser {
 interface FakeProfile {
   id: string;
   userId: string;
+  /** Session 11 — the upload gate reads this; seeded APPROVED unless a test says otherwise. */
+  approvalStatus: 'PENDING' | 'APPROVED' | 'REJECTED';
 }
 
 interface FakeContent {
@@ -322,9 +324,13 @@ async function loginAs(
 const userIdFor = (prisma: FakePrisma, email: string) =>
   prisma.__users.find((u) => u.email === email)!.id;
 
-/** Seed a ModelProfile so uploads pass the "profile required" gate. */
-function seedProfile(prisma: FakePrisma, userId: string) {
-  prisma.__profiles.push({ id: `mp_${userId}`, userId });
+/** Seed a ModelProfile so uploads pass the "profile required" + approval gates. */
+function seedProfile(
+  prisma: FakePrisma,
+  userId: string,
+  approvalStatus: FakeProfile['approvalStatus'] = 'APPROVED',
+) {
+  prisma.__profiles.push({ id: `mp_${userId}`, userId, approvalStatus });
 }
 
 /** Seed a Content row directly (faster than uploading for non-upload tests). */

@@ -41,6 +41,11 @@
 // sent in. A plain String with a default, not an enum: the allowlist
 // ('pt-BR' | 'en') is enforced with Zod at every write path, so adding a third
 // language later is a code change, not a second enum migration.
+// Session 11 adds the admin console's state: `ModelProfile.approvalStatus` (a
+// human decision to let a model monetize, separate from email verification),
+// `User.suspendedAt` (an admin lock-out honoured by login and refresh), and
+// `Report` (subscriber-flagged content, resolved by an admin). Every transition
+// on these is written to `AuditLog` by the admin module.
 // =============================================================================
 
 generator client {
@@ -81,6 +86,10 @@ model User {
   // Language for transactional email (Session 10). Allowlisted by Zod on every
   // write ('pt-BR' | 'en'); the default matches DEFAULT_LOCALE in shared.
   preferredLocale      String          @default("pt-BR")
+  // Admin lock-out (Session 11). Non-null means login and refresh are refused
+  // with `account_suspended`; reinstating nulls it. Never set for an ADMIN
+  // through the API — an admin cannot suspend another admin.
+  suspendedAt          DateTime?
   modelProfile         ModelProfile?
   uploadedContent      Content[]
   contentAccesses      ContentAccess[]
@@ -105,8 +114,18 @@ model User {
   generationRequests  GenerationJob[] @relation("SubscriberGenerations")
   likenessGenerations GenerationJob[] @relation("ModelGenerations")
 
+  // Session 11 — content this user flagged for moderation.
+  reports Report[] @relation("ReporterReports")
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+// Session 11 — whether an admin has cleared this model to monetize.
+enum ModelApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
 }
 
 // ─── ModelProfile ────────────────────────────────────────────────────────────
@@ -136,6 +155,16 @@ model ModelProfile {
   // trusting an application-layer check. Null until the model sets it, which
   // makes them skipped (never failed) by a payout run.
   payoutEmail String? @unique
+
+  // ─── Approval (Session 11) ────────────────────────────────────────────────
+  // A human decision that this model may monetize — upload content and accept
+  // paying subscribers. Deliberately separate from `User.isVerified`, which
+  // only proves the email address. Every model starts PENDING; an admin moves
+  // it to APPROVED or REJECTED (with a reason), and `approve` works from any
+  // prior status so REJECTED is never a dead end.
+  approvalStatus          ModelApprovalStatus @default(PENDING)
+  approvalReviewedAt      DateTime?
+  approvalRejectionReason String?
 
   referenceImages ReferenceImage[]
 
@@ -201,6 +230,8 @@ model Content {
   updatedAt    DateTime    @updatedAt
 
   accesses ContentAccess[]
+  // Session 11 — moderation reports filed against this item.
+  reports  Report[]
 
   @@index([modelId])
   @@index([tier])
@@ -611,4 +642,47 @@ model GenerationJob {
   @@index([subscriberId, createdAt])
   // Future revenue-share query path (unused today; cheap now vs. a migration later).
   @@index([modelId])
+}
+
+// ─── Report (Session 11) ─────────────────────────────────────────────────────
+// A viewer's flag on a piece of content, resolved by an admin. One PENDING
+// report per (contentId, reporterId) is enforced by a hand-written partial
+// unique index in the migration (Prisma has no partial-index primitive — same
+// pattern as GenerationJob's one-pending-per-subscriber index), so a repeat
+// report from the same viewer is a no-op at the database, not an app check.
+// `details` is free text: stored verbatim, HTML-escaped at every render.
+enum ReportReason {
+  SPAM
+  ILLEGAL
+  NON_CONSENSUAL
+  OTHER
+}
+
+enum ReportStatus {
+  PENDING
+  RESOLVED
+  DISMISSED
+}
+
+model Report {
+  id         String  @id @default(cuid())
+  contentId  String
+  content    Content @relation(fields: [contentId], references: [id], onDelete: Cascade)
+  reporterId String
+  reporter   User    @relation("ReporterReports", fields: [reporterId], references: [id], onDelete: Cascade)
+
+  reason  ReportReason
+  details String?
+
+  status         ReportStatus @default(PENDING)
+  // 'none' | 'unpublish' | 'unpublish_and_suspend_model' — what the admin chose.
+  resolvedAction String?
+  resolvedAt     DateTime?
+
+  createdAt DateTime @default(now())
+
+  // The admin queue: pending first, oldest first.
+  @@index([status, createdAt])
+  @@index([contentId])
+  @@index([reporterId])
 }
