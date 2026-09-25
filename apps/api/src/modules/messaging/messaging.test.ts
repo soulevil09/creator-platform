@@ -809,6 +809,44 @@ describe('PATCH /api/messages/conversations/:conversationId/read', () => {
   });
 });
 
+// ── Session 11.5: both budgets are keyed on the JWT's userId, not the IP ────
+describe('messaging rate limits are per account, not per IP', () => {
+  it('SEND_RATE_LIMIT (60/min) — PATCH /conversations/:id/read', async () => {
+    const { prisma, app, subCookie, modelCookie, subscriberId, modelId } = await setupPair();
+    const conversation = seedConversation(prisma, { subscriberId, modelId });
+    const markRead = (cookie: string, remoteAddress = '127.0.0.1') =>
+      app.inject({
+        method: 'PATCH',
+        url: `/api/messages/conversations/${conversation.id}/read`,
+        cookies: { access_token: cookie },
+        remoteAddress,
+      });
+
+    for (let i = 0; i < 60; i++) expect((await markRead(subCookie)).statusCode).toBe(200);
+    expect((await markRead(subCookie)).statusCode).toBe(429);
+    // The same account from a different IP is still blocked …
+    expect((await markRead(subCookie, '10.0.0.2')).statusCode).toBe(429);
+    // … while the other participant behind the same IP has its own budget.
+    expect((await markRead(modelCookie)).statusCode).toBe(200);
+  });
+
+  it('READ_RATE_LIMIT (120/min) — GET /conversations', async () => {
+    const { app, subCookie, modelCookie } = await setupPair();
+    const list = (cookie: string, remoteAddress = '127.0.0.1') =>
+      app.inject({
+        method: 'GET',
+        url: '/api/messages/conversations',
+        cookies: { access_token: cookie },
+        remoteAddress,
+      });
+
+    for (let i = 0; i < 120; i++) expect((await list(subCookie)).statusCode).toBe(200);
+    expect((await list(subCookie)).statusCode).toBe(429);
+    expect((await list(subCookie, '10.0.0.2')).statusCode).toBe(429);
+    expect((await list(modelCookie)).statusCode).toBe(200);
+  });
+});
+
 // ── WebSocket: GET /ws/messages ──────────────────────────────────────────────
 //
 // The only suite that needs a real listening server: an upgrade cannot be

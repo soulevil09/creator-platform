@@ -288,6 +288,36 @@ describe('PATCH /api/auth/me/locale', () => {
     });
     expect(res.statusCode).toBe(401);
   });
+
+  // Session 11.5 — the budget is keyed on the JWT's userId, not the IP.
+  it('rate-limits per account (20/hour), not per IP', async () => {
+    const { prisma, app, accessToken } = await loggedIn();
+    const patch = (token: string, remoteAddress = '127.0.0.1') =>
+      app.inject({
+        method: 'PATCH',
+        url: '/api/auth/me/locale',
+        cookies: { access_token: token },
+        payload: { locale: 'en' },
+        remoteAddress,
+      });
+
+    for (let i = 0; i < 20; i++) expect((await patch(accessToken)).statusCode).toBe(200);
+    expect((await patch(accessToken)).statusCode).toBe(429);
+    // The same account from a different IP is still blocked …
+    expect((await patch(accessToken, '10.0.0.2')).statusCode).toBe(429);
+
+    // … while a second account behind the same IP has its own budget.
+    const other = { ...validRegister, email: 'other@example.com' };
+    await app.inject({ method: 'POST', url: '/api/auth/register', payload: other });
+    const token = prisma.__users.find((u) => u.email === other.email)!.verifyToken!;
+    await app.inject({ method: 'GET', url: `/api/auth/verify-email?token=${token}` });
+    const login = await app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: { email: other.email, password: other.password },
+    });
+    expect((await patch(cookieValue(login, 'access_token')!)).statusCode).toBe(200);
+  });
 });
 
 describe('GET /api/auth/verify-email', () => {

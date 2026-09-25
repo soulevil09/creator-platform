@@ -660,6 +660,30 @@ describe('subscription lifecycle', () => {
       expect(wrongRole.statusCode).toBe(403);
       expect(prisma.__subscriptions[0].cancelAtPeriodEnd).toBe(false);
     });
+
+    // Session 11.5 — the budget is keyed on the JWT's userId, not the IP.
+    it('rate-limits per account (20/hour), not per IP', async () => {
+      const otherCookie = await loginAs(app, prisma, 'subscriber', 'other-sub@example.com');
+      seedSubscription(prisma, { subscriberId, modelId });
+      seedSubscription(prisma, {
+        subscriberId: userIdFor(prisma, 'other-sub@example.com'),
+        modelId,
+      });
+      const cancelFrom = (cookie: string, remoteAddress = '127.0.0.1') =>
+        app.inject({
+          method: 'POST',
+          url: `/api/subscriptions/model/${modelId}/cancel`,
+          cookies: { access_token: cookie },
+          remoteAddress,
+        });
+
+      for (let i = 0; i < 20; i++) expect((await cancelFrom(subCookie)).statusCode).toBe(200);
+      expect((await cancelFrom(subCookie)).statusCode).toBe(429);
+      // The same account from a different IP is still blocked …
+      expect((await cancelFrom(subCookie, '10.0.0.2')).statusCode).toBe(429);
+      // … while a second account behind the same IP has its own budget.
+      expect((await cancelFrom(otherCookie)).statusCode).toBe(200);
+    });
   });
 
   // ── §6 The seam: paying the reminder charge reactivates the subscription ───

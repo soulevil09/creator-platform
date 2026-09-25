@@ -70,7 +70,9 @@ function resolveRegistrationLocale(
 /**
  * Keyed on the caller, not the IP — the same write budget as the Session 06.5
  * cancel/resume endpoints: one NAT must not share a budget, and one account
- * must not earn a fresh one per IP.
+ * must not earn a fresh one per IP. Attached via `app.rateLimit()` AFTER
+ * `authenticate` (Session 11.5): the `config.rateLimit` form runs at
+ * `onRequest`, before `request.user` is set, so it silently keyed on the IP.
  */
 const AUTHENTICATED_WRITE_RATE_LIMIT = {
   max: 20,
@@ -204,7 +206,7 @@ export default async function authRoutes(
   // userId comes from the JWT only.
   app.patch(
     '/me/locale',
-    { preHandler: authenticate, config: { rateLimit: AUTHENTICATED_WRITE_RATE_LIMIT } },
+    { preHandler: [authenticate, app.rateLimit(AUTHENTICATED_WRITE_RATE_LIMIT)] },
     async (request, reply) => {
       const parsed = updateLocaleSchema.safeParse(request.body);
       if (!parsed.success) {

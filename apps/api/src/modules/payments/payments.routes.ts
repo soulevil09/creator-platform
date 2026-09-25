@@ -23,7 +23,12 @@ export interface PaymentRoutesOptions extends FastifyPluginOptions {
   service: PaymentsService;
 }
 
-/** Checkout is charge-creating, so it is capped per authenticated user. */
+/**
+ * Checkout is charge-creating, so it is capped per authenticated user.
+ * Attached via `app.rateLimit()` AFTER `authenticate` (Session 11.5): the
+ * `config.rateLimit` form runs at `onRequest`, before `request.user` is set,
+ * so it silently keyed on the IP.
+ */
 const CHECKOUT_RATE_LIMIT = {
   max: 10,
   timeWindow: '1 minute',
@@ -74,7 +79,7 @@ export default async function paymentRoutes(
   // ── POST /checkout/subscription ───────────────────────────────────────────
   app.post(
     '/checkout/subscription',
-    { ...subscriberOnly, config: { rateLimit: CHECKOUT_RATE_LIMIT } },
+    { preHandler: [...subscriberOnly.preHandler, app.rateLimit(CHECKOUT_RATE_LIMIT)] },
     async (request, reply) => {
       const parsed = subscriptionCheckoutSchema.safeParse(request.body);
       if (!parsed.success) {
@@ -97,7 +102,7 @@ export default async function paymentRoutes(
   // ── POST /checkout/credits ────────────────────────────────────────────────
   app.post(
     '/checkout/credits',
-    { ...subscriberOnly, config: { rateLimit: CHECKOUT_RATE_LIMIT } },
+    { preHandler: [...subscriberOnly.preHandler, app.rateLimit(CHECKOUT_RATE_LIMIT)] },
     async (request, reply) => {
       const parsed = creditsCheckoutSchema.safeParse(request.body);
       if (!parsed.success) {

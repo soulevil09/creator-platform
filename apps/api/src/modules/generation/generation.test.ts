@@ -964,6 +964,30 @@ describe('POST /api/generations', () => {
     expect(eleventh.statusCode).toBe(429);
     expect(balanceOf(h, sub.userId)).toBe(1000 - 10 * PRESET.creditsCost);
   });
+
+  // Session 11.5 — the budget is keyed on the JWT's userId, not the IP.
+  it('rate-limits per account, not per IP', async () => {
+    const sub = await seedSubscriber(h, 1000);
+    const other = await seedSubscriber(h, 1000, 'other-sub@example.com');
+    const model = await seedConsentingModel(h);
+    const payload = { modelId: model.userId, mode: 'preset', presetId: PRESET.id };
+    const generate = (cookie: string, remoteAddress = '127.0.0.1') =>
+      h.app.inject({
+        method: 'POST',
+        url: '/api/generations',
+        cookies: { access_token: cookie },
+        payload,
+        remoteAddress,
+      });
+
+    for (let i = 0; i < 10; i++) expect((await generate(sub.cookie)).statusCode).toBe(201);
+    expect((await generate(sub.cookie)).statusCode).toBe(429);
+    // The same account from a different IP is still blocked …
+    expect((await generate(sub.cookie, '10.0.0.2')).statusCode).toBe(429);
+    // … while a second account behind the same IP has its own budget.
+    expect((await generate(other.cookie)).statusCode).toBe(201);
+    expect(balanceOf(h, sub.userId)).toBe(1000 - 10 * PRESET.creditsCost);
+  });
 });
 
 // ── §7 Anchor-prompt non-leakage ─────────────────────────────────────────────

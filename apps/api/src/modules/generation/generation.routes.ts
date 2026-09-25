@@ -27,7 +27,10 @@ export interface GenerationRoutesOptions extends FastifyPluginOptions {
 /**
  * 10 generations per hour per subscriber, keyed on the JWT `userId` rather
  * than the IP (Session 05/07 precedent: NAT neighbours must not share a
- * budget, and one account must not earn a fresh one per IP).
+ * budget, and one account must not earn a fresh one per IP). Attached via
+ * `app.rateLimit()` AFTER `authenticate` (Session 11.5): the `config.rateLimit`
+ * form runs at `onRequest`, before `request.user` is set, so it silently keyed
+ * on the IP.
  *
  * Why 10: each call debits at least 10 credits and holds a connection open
  * for up to `GENERATION_TIMEOUT_MS` (90 s). Ten an hour caps one account at
@@ -73,7 +76,7 @@ export default async function generationRoutes(
   // ── POST / ────────────────────────────────────────────────────────────────
   app.post(
     '/',
-    { ...subscriberOnly, config: { rateLimit: CREATE_RATE_LIMIT } },
+    { preHandler: [...subscriberOnly.preHandler, app.rateLimit(CREATE_RATE_LIMIT)] },
     async (request, reply) => {
       const parsed = createGenerationSchema.safeParse(request.body);
       if (!parsed.success) {

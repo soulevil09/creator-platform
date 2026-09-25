@@ -48,7 +48,12 @@ function sendError(reply: FastifyReply, err: unknown): FastifyReply {
 
 const subscriberOnly = { preHandler: [authenticate, authorize('subscriber')] };
 const READ_RATE_LIMIT = { max: 60, timeWindow: '1 minute' };
-/** Keyed on the caller, not the IP — one NAT must not share a budget. */
+/**
+ * Keyed on the caller, not the IP — one NAT must not share a budget. Attached
+ * via `app.rateLimit()` AFTER `authenticate` (Session 11.5): the
+ * `config.rateLimit` form runs at `onRequest`, before `request.user` is set,
+ * so it silently keyed on the IP.
+ */
 const WRITE_RATE_LIMIT = {
   max: 20,
   timeWindow: '1 hour',
@@ -78,7 +83,7 @@ export default async function subscriptionRoutes(
   // Stops renewal; access continues through the period already paid for.
   app.post(
     '/model/:modelId/cancel',
-    { ...subscriberOnly, config: { rateLimit: WRITE_RATE_LIMIT } },
+    { preHandler: [...subscriberOnly.preHandler, app.rateLimit(WRITE_RATE_LIMIT)] },
     async (request, reply) => {
       const parsed = modelIdParamsSchema.safeParse(request.params);
       if (!parsed.success) {
@@ -96,7 +101,7 @@ export default async function subscriptionRoutes(
   // ── POST /model/:modelId/resume ───────────────────────────────────────────
   app.post(
     '/model/:modelId/resume',
-    { ...subscriberOnly, config: { rateLimit: WRITE_RATE_LIMIT } },
+    { preHandler: [...subscriberOnly.preHandler, app.rateLimit(WRITE_RATE_LIMIT)] },
     async (request, reply) => {
       const parsed = modelIdParamsSchema.safeParse(request.params);
       if (!parsed.success) {

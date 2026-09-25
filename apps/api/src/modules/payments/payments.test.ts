@@ -684,6 +684,49 @@ describe('POST /api/payments/checkout/credits', () => {
   });
 });
 
+// Session 11.5 — the checkout budget is keyed on the JWT's userId, not the IP.
+describe('checkout rate limit is per account, not per IP', () => {
+  it.each([
+    ['/api/payments/checkout/subscription', 'subscription'],
+    ['/api/payments/checkout/credits', 'credits'],
+  ] as const)('%s', async (url, kind) => {
+    const prisma = createFakePrisma();
+    const app = await makeApp(prisma);
+    await loginAs(app, prisma, 'model', 'model@example.com');
+    const modelId = userIdFor(prisma, 'model@example.com');
+    seedProfile(prisma, modelId);
+    const subCookie = await loginAs(app, prisma, 'subscriber', 'sub@example.com');
+    const otherCookie = await loginAs(app, prisma, 'subscriber', 'other-sub@example.com');
+
+    nock(WOOVI_URL)
+      .post('/api/v1/subscriptions')
+      .times(11)
+      .reply(200, { subscription: { globalID: 's1' } });
+    nock(WOOVI_URL).post('/api/v1/charge').times(11).reply(200, wooviChargeReply('unused'));
+
+    const payload =
+      kind === 'subscription'
+        ? { modelId, tier: 'STANDARD', provider: 'pix' }
+        : { packId: 'plus', provider: 'pix' };
+    const checkout = (cookie: string, remoteAddress = '127.0.0.1') =>
+      app.inject({
+        method: 'POST',
+        url,
+        cookies: { access_token: cookie },
+        payload,
+        remoteAddress,
+      });
+
+    for (let i = 0; i < 10; i++) expect((await checkout(subCookie)).statusCode).toBe(201);
+    expect((await checkout(subCookie)).statusCode).toBe(429);
+    // The same account from a different IP is still blocked …
+    expect((await checkout(subCookie, '10.0.0.2')).statusCode).toBe(429);
+    // … while a second account behind the same IP has its own budget.
+    expect((await checkout(otherCookie)).statusCode).toBe(201);
+    expect(prisma.__transactions).toHaveLength(11);
+  });
+});
+
 // ── §7 Webhooks ──────────────────────────────────────────────────────────────
 describe('POST /api/payments/woovi/webhook', () => {
   let prisma: FakePrisma;

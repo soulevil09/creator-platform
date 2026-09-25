@@ -54,6 +54,9 @@ export const MAX_MESSAGE_VIDEO_BYTES = 100 * 1024 * 1024; // 100 MB
  * Sends are capped per authenticated user, not per IP — two subscribers behind
  * one NAT must not exhaust each other's budget, and one account must not earn a
  * fresh budget by changing IP. Same precedent as the payments checkout.
+ * Both limits are attached via `app.rateLimit()` AFTER `authenticate` (Session
+ * 11.5): the `config.rateLimit` form runs at `onRequest`, before `request.user`
+ * is set, so it silently keyed on the IP.
  */
 const SEND_RATE_LIMIT = {
   max: 60,
@@ -88,10 +91,7 @@ export default async function messagingRoutes(
   // ACTIVE subscription to. Idempotent: 201 the first time, 200 thereafter.
   app.post<{ Params: { modelId: string } }>(
     '/conversations/:modelId',
-    {
-      preHandler: [authenticate, authorize('subscriber')],
-      config: { rateLimit: SEND_RATE_LIMIT },
-    },
+    { preHandler: [authenticate, authorize('subscriber'), app.rateLimit(SEND_RATE_LIMIT)] },
     async (request, reply) => {
       const parsed = modelIdParamsSchema.safeParse(request.params);
       if (!parsed.success) {
@@ -114,7 +114,7 @@ export default async function messagingRoutes(
   // caller id comes from the JWT, so there is no other inbox to ask for.
   app.get(
     '/conversations',
-    { preHandler: [authenticate], config: { rateLimit: READ_RATE_LIMIT } },
+    { preHandler: [authenticate, app.rateLimit(READ_RATE_LIMIT)] },
     async (request, reply) => {
       const result = await service.listConversations(request.user.userId);
       return reply.code(200).send(result);
@@ -124,7 +124,7 @@ export default async function messagingRoutes(
   // ── GET /conversations/:conversationId/messages ───────────────────────────
   app.get<{ Params: { conversationId: string } }>(
     '/conversations/:conversationId/messages',
-    { preHandler: [authenticate], config: { rateLimit: READ_RATE_LIMIT } },
+    { preHandler: [authenticate, app.rateLimit(READ_RATE_LIMIT)] },
     async (request, reply) => {
       const params = conversationIdParamsSchema.safeParse(request.params);
       if (!params.success) {
@@ -154,7 +154,7 @@ export default async function messagingRoutes(
   // sidestepped by choosing the other content type.
   app.post<{ Params: { conversationId: string } }>(
     '/conversations/:conversationId/messages',
-    { preHandler: [authenticate], config: { rateLimit: SEND_RATE_LIMIT } },
+    { preHandler: [authenticate, app.rateLimit(SEND_RATE_LIMIT)] },
     async (request, reply) => {
       const params = conversationIdParamsSchema.safeParse(request.params);
       if (!params.success) {
@@ -249,7 +249,7 @@ export default async function messagingRoutes(
   // rather than the storage key behind it.
   app.get<{ Params: { messageId: string } }>(
     '/attachments/:messageId',
-    { preHandler: [authenticate], config: { rateLimit: READ_RATE_LIMIT } },
+    { preHandler: [authenticate, app.rateLimit(READ_RATE_LIMIT)] },
     async (request, reply) => {
       const parsed = messageIdParamsSchema.safeParse(request.params);
       if (!parsed.success) {
@@ -267,7 +267,7 @@ export default async function messagingRoutes(
   // ── PATCH /conversations/:conversationId/read ─────────────────────────────
   app.patch<{ Params: { conversationId: string } }>(
     '/conversations/:conversationId/read',
-    { preHandler: [authenticate], config: { rateLimit: SEND_RATE_LIMIT } },
+    { preHandler: [authenticate, app.rateLimit(SEND_RATE_LIMIT)] },
     async (request, reply) => {
       const parsed = conversationIdParamsSchema.safeParse(request.params);
       if (!parsed.success) {
