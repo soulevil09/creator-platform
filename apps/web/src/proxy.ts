@@ -1,4 +1,8 @@
-// Per-request CSP nonce (Session 12, D5) — the Next 14 App Router pattern.
+// Per-request CSP nonce (Session 12, D5) — the Next 16 Proxy pattern.
+//
+// `src/middleware.ts` / `middleware()` was renamed to proxy in Session 12.6:
+// Next 16 replaced that file convention with Proxy (`src/proxy.ts`, exported
+// `proxy`, Node.js runtime). The logic below is unchanged by the rename.
 //
 // A fresh nonce is minted for every document request and put in the
 // Content-Security-Policy on BOTH the forwarded request (Next reads it from
@@ -11,7 +15,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { buildContentSecurityPolicy, createNonce } from './security/csp';
 
-export function middleware(request: NextRequest) {
+export function proxy(request: NextRequest) {
   const nonce = createNonce();
   const csp = buildContentSecurityPolicy({
     nonce,

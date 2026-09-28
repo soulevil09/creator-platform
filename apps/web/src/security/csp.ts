@@ -1,8 +1,8 @@
 // =============================================================================
 // Content-Security-Policy for the web app (Session 12, D5).
 //
-// Pure: the middleware mints a fresh nonce per request and calls this; the
-// unit test calls it directly. Next 14's App Router reads the nonce back out
+// Pure: the proxy (`src/proxy.ts`) mints a fresh nonce per request and calls
+// this; the unit test calls it directly. Next's App Router reads the nonce back out
 // of the request's CSP header and stamps it on every script it renders, so
 // `'strict-dynamic'` lets exactly those scripts (and what they load) run —
 // no host allowlist for scripts, and never `'unsafe-inline'` for scripts.
@@ -74,7 +74,7 @@ export function buildContentSecurityPolicy({
     .join('; ');
 }
 
-/** 128 random bits, base64 — Web Crypto only, so it runs in the Edge middleware. */
+/** 128 random bits, base64 — Web Crypto only, so it runs in any runtime (Node.js proxy included). */
 export function createNonce(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   return btoa(String.fromCharCode(...bytes));

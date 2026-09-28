@@ -100,7 +100,8 @@ findings are marked **[S12]** with what was done about them.
   content-safety gate with no bypass — `api/modules/generation/safety.ts`.
 - **[S12]** Browser-side defence in depth: a per-request nonce CSP with
   `'strict-dynamic'`, no `'unsafe-inline'` for scripts —
-  `apps/web/src/middleware.ts`, `apps/web/src/security/csp.ts`; the API sends
+  `apps/web/src/proxy.ts` (`middleware.ts` until it was renamed to proxy in
+  Session 12.6), `apps/web/src/security/csp.ts`; the API sends
   `default-src 'none'` — `api/index.ts`.
 
 **Residual risks**
@@ -197,31 +198,38 @@ findings are marked **[S12]** with what was done about them.
   GHSA-rgj7-g3m4-5g8c), `fast-uri` → 3.1.8 (7 advisories, via
   `@fastify/ajv-compiler`), `find-my-way` → 9.9.0 (CVE-2026-47219),
   `nanoid` → 3.3.19 (CVE-2026-67213, CVE-2026-67214, via `postcss`).
+- **[S12.6]** `next` 14.2.35 → **16.3.6** (with React 19.3): every Next 14 /
+  `postcss@8.4.31` exception below is resolved by the upgrade, and the
+  `pnpm.auditConfig` block has been **removed** from root `package.json` — zero
+  exceptions remain. Next 16.3.6 pins `postcss@8.5.23`, which has no advisory,
+  so no `pnpm.overrides` entry was needed.
+- **[S12.6]** Defence in depth for the Image Optimization API:
+  `images: { unoptimized: true }` in `apps/web/next.config.mjs` makes `next start` answer
+  `/_next/image` with a 404 (verified empirically — it served `200 image/png`
+  on 16.3.6 without it); pinned by `apps/web/src/i18n/ssr.test.ts`.
 
-**Exceptions** — root `package.json` → `pnpm.auditConfig`, one entry per
-advisory. All are in `next@14.2.35` (the latest 14.x) or `postcss@8.4.31`,
-which `next@14` pins exactly; every fix is in **Next 15.x**, a major upgrade
-outside this session. Advisories with no CVE id are ignored by GHSA id
-(`ignoreGhsas`), because `ignoreCves` cannot name them.
+**Exceptions** — none. The Session 12 exceptions, kept here for the record, all
+**resolved by Session 12.6**:
 
-| Id                                   | Package            | Severity     | Summary                                               | Exposure here                                                                                                                  |
-| ------------------------------------ | ------------------ | ------------ | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| GHSA-2xp9-vwfh-vxw4                  | next               | **critical** | Unauthenticated RCE in the Image Optimization API     | The app renders no `next/image`, but `next start` still serves `/_next/image`. **Highest-priority reason to move to Next 15.** |
-| CVE-2026-75604 (GHSA-p293-qw3h-jr36) | next               | critical     | Unauthenticated RCE on **Windows-hosted** servers     | Not applicable to a Linux host.                                                                                                |
-| CVE-2026-44573 (GHSA-36qx-fr4f-26g5) | next               | high         | Middleware/proxy bypass in **Pages Router** apps      | App Router only; the middleware sets headers, it is not an auth gate.                                                          |
-| CVE-2026-44578 (GHSA-c4j6-fc7j-m34r) | next               | high         | SSRF in applications using WebSocket upgrades         | The Next app handles no WebSocket upgrades (the socket is on the API); low.                                                    |
-| CVE-2026-64645 (GHSA-p9j2-gv94-2wf4) | next               | high         | SSRF in rewrites via attacker-controlled input        | No `rewrites` configured.                                                                                                      |
-| CVE-2026-64649 (GHSA-89xv-2m56-2m9x) | next               | high         | SSRF in Server Actions on custom servers              | No Server Actions; no custom server.                                                                                           |
-| CVE-2026-64641 (GHSA-m99w-x7hq-7vfj) | next               | high         | DoS in App Router using Server Actions                | No Server Actions.                                                                                                             |
-| GHSA-q4gf-8mx6-v5v3                  | next               | high         | DoS with Server Components                            | Applies (App Router).                                                                                                          |
-| GHSA-8h8q-6873-q5fj                  | next               | high         | DoS with Server Components                            | Applies (App Router).                                                                                                          |
-| GHSA-h25m-26qc-wcjf                  | next               | high         | HTTP request deserialization DoS (insecure RSC usage) | Applies (App Router).                                                                                                          |
-| CVE-2026-45623 (GHSA-6g55-p6wh-862q) | postcss (via next) | high         | File read via attacker-controlled CSS/source maps     | Build-time only; the app processes no untrusted CSS.                                                                           |
-| CVE-2026-73646 (GHSA-r28c-9q8g-f849) | postcss (via next) | high         | Path traversal in previous source-map auto-loading    | Build-time only.                                                                                                               |
+| Id                                   | Package            | Severity     | Summary                                               | Exposure here                                                                                                     | Status           |
+| ------------------------------------ | ------------------ | ------------ | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ---------------- |
+| GHSA-2xp9-vwfh-vxw4                  | next               | **critical** | Unauthenticated RCE in the Image Optimization API     | The app renders no `next/image`, but `next start` still serves `/_next/image`. Endpoint now closed (404) as well. | Resolved (S12.6) |
+| CVE-2026-75604 (GHSA-p293-qw3h-jr36) | next               | critical     | Unauthenticated RCE on **Windows-hosted** servers     | Not applicable to a Linux host.                                                                                   | Resolved (S12.6) |
+| CVE-2026-44573 (GHSA-36qx-fr4f-26g5) | next               | high         | Middleware/proxy bypass in **Pages Router** apps      | App Router only; the proxy sets headers, it is not an auth gate.                                                  | Resolved (S12.6) |
+| CVE-2026-44578 (GHSA-c4j6-fc7j-m34r) | next               | high         | SSRF in applications using WebSocket upgrades         | The Next app handles no WebSocket upgrades (the socket is on the API); low.                                       | Resolved (S12.6) |
+| CVE-2026-64645 (GHSA-p9j2-gv94-2wf4) | next               | high         | SSRF in rewrites via attacker-controlled input        | No `rewrites` configured.                                                                                         | Resolved (S12.6) |
+| CVE-2026-64649 (GHSA-89xv-2m56-2m9x) | next               | high         | SSRF in Server Actions on custom servers              | No Server Actions; no custom server.                                                                              | Resolved (S12.6) |
+| CVE-2026-64641 (GHSA-m99w-x7hq-7vfj) | next               | high         | DoS in App Router using Server Actions                | No Server Actions.                                                                                                | Resolved (S12.6) |
+| GHSA-q4gf-8mx6-v5v3                  | next               | high         | DoS with Server Components                            | Applies (App Router).                                                                                             | Resolved (S12.6) |
+| GHSA-8h8q-6873-q5fj                  | next               | high         | DoS with Server Components                            | Applies (App Router).                                                                                             | Resolved (S12.6) |
+| GHSA-h25m-26qc-wcjf                  | next               | high         | HTTP request deserialization DoS (insecure RSC usage) | Applies (App Router).                                                                                             | Resolved (S12.6) |
+| CVE-2026-45623 (GHSA-6g55-p6wh-862q) | postcss (via next) | high         | File read via attacker-controlled CSS/source maps     | Build-time only; the app processes no untrusted CSS.                                                              | Resolved (S12.6) |
+| CVE-2026-73646 (GHSA-r28c-9q8g-f849) | postcss (via next) | high         | Path traversal in previous source-map auto-loading    | Build-time only.                                                                                                  | Resolved (S12.6) |
 
-**Residual risk:** the Next 14 exceptions, above all the critical
-Image-Optimization RCE. Upgrading to Next 15 removes all 12 exceptions and is
-tracked in CLAUDE.md Open Items. Moderate/low advisories are not gated.
+**Residual risk:** none gated. Moderate/low advisories are not gated; at the
+time of Session 12.6 two moderate `fastify` advisories are open in `apps/api`
+(GHSA-w2qp-rph6-63g4, GHSA-3m5p-2c4r-xxw2 — both patched in `fastify` 5.12.1),
+left for a session that may change the API (see CLAUDE.md Open Items).
 
 ## A07 — Identification and Authentication Failures
 

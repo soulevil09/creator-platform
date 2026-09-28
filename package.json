@@ -5,7 +5,7 @@
   "description": "Content monetization platform with AI-powered image personalization.",
   "packageManager": "pnpm@10.30.0",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "dev": "turbo run dev",
@@ -19,7 +19,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.9.0",
-    "@types/node": "^20.14.0",
+    "@types/node": "^22.20.4",
     "eslint": "^9.9.0",
     "eslint-plugin-jsx-a11y": "^6.10.2",
     "globals": "^15.9.0",
@@ -34,24 +34,6 @@
       "@prisma/engines",
       "prisma",
       "esbuild"
-    ],
-    "auditConfig": {
-      "ignoreCves": [
-        "CVE-2026-44573",
-        "CVE-2026-44578",
-        "CVE-2026-64641",
-        "CVE-2026-64645",
-        "CVE-2026-64649",
-        "CVE-2026-75604",
-        "CVE-2026-45623",
-        "CVE-2026-73646"
-      ],
-      "ignoreGhsas": [
-        "GHSA-h25m-26qc-wcjf",
-        "GHSA-q4gf-8mx6-v5v3",
-        "GHSA-8h8q-6873-q5fj",
-        "GHSA-2xp9-vwfh-vxw4"
-      ]
-    }
+    ]
   }
 }

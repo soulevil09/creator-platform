@@ -183,7 +183,7 @@ describe('security headers on a production `next start` response', () => {
     for (const tag of scripts) {
       expect(tag).toContain(`nonce="${nonce}"`);
     }
-    // The locale behaviour is unchanged by the middleware.
+    // The locale behaviour is unchanged by the proxy.
     expect(lang(page)).toBe('en');
   });
 
@@ -206,5 +206,19 @@ describe('security headers on a production `next start` response', () => {
       'max-age=31536000; includeSubDomains',
     );
     expect(lang(await res.text())).toBe('pt-BR');
+  });
+});
+
+// ── Session 12.6, D3 — the Image Optimization API is closed ─────────────────
+describe('`/_next/image` on a production `next start` server', () => {
+  it('answers 4xx with no image, because `images.unoptimized` removes the optimizer', async () => {
+    const res = await fetch(`${baseUrl}/_next/image?url=%2Ffavicon.ico&w=64&q=75`);
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBeLessThan(500);
+    expect(res.headers.get('content-type') ?? '').not.toMatch(/^image\//);
+    // 404, not the optimizer's own 400: with the optimizer enabled, a missing
+    // source (this app ships no favicon) is a 400 — so only a 404 shows the
+    // route itself is gone rather than the input being rejected.
+    expect(res.status).toBe(404);
   });
 });
