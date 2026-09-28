@@ -51,5 +51,4 @@ jobs:
             --max-time 300 \
             -X POST "${API_PUBLIC_URL}/api/subscriptions/renewals/run" \
             -H "X-Renewal-Cron-Secret: ${SUBSCRIPTION_RENEWAL_CRON_SECRET}" \
-            -H 'Content-Type: application/json' \
             | tee "$GITHUB_STEP_SUMMARY"
