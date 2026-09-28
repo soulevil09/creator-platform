@@ -25,9 +25,15 @@ const WEB_ROOT = resolve(__dirname, '../..');
 const DIST_DIR = '.next-test';
 const BUILD_TIMEOUT_MS = 240_000;
 
-/** The build inlines NEXT_PUBLIC_* values; pin the default so step 3 is deterministic. */
+/**
+ * The build inlines NEXT_PUBLIC_* values; pin the default so step 3 is
+ * deterministic. NODE_ENV is pinned to `production` because Vitest exports
+ * `test` to child processes, and a deployed `next build`/`next start` runs as
+ * production — which is what the Session 12 header assertions (HSTS) are about.
+ */
 const buildEnv = {
   ...process.env,
+  NODE_ENV: 'production' as const,
   NEXT_DIST_DIR: DIST_DIR,
   NEXT_PUBLIC_DEFAULT_LOCALE: 'pt-BR',
   NEXT_TELEMETRY_DISABLED: '1',
@@ -152,5 +158,53 @@ describe('server-rendered locale', () => {
     expect(page).toContain(en.wallet.status.signInRequired);
     expect(page).not.toContain(ptBR.wallet.balanceHeading);
     expect(page).not.toContain(ptBR.wallet.status.signInRequired);
+  });
+});
+
+// ── Session 12, D5 — per-request CSP nonce on the production server ─────────
+describe('security headers on a production `next start` response', () => {
+  const nonceOf = (csp: string | null) => csp?.match(/'nonce-([^']+)'/)?.[1];
+
+  it('carries a nonce CSP, and every <script> in the HTML carries that same nonce', async () => {
+    const res = await fetch(`${baseUrl}/`, { headers: { 'accept-language': 'en' } });
+    expect(res.status).toBe(200);
+    const csp = res.headers.get('content-security-policy');
+    const nonce = nonceOf(csp);
+    expect(nonce).toBeTruthy();
+    expect(csp).toContain("'strict-dynamic'");
+    expect(csp).not.toContain('unsafe-eval');
+    expect(csp).toContain("frame-ancestors 'none'");
+    expect(csp).toContain("object-src 'none'");
+
+    const page = await res.text();
+    const scripts = page.match(/<script\b[^>]*>/g) ?? [];
+    const inline = scripts.filter((tag) => !/\ssrc=/.test(tag));
+    expect(inline.length).toBeGreaterThan(0);
+    for (const tag of scripts) {
+      expect(tag).toContain(`nonce="${nonce}"`);
+    }
+    // The locale behaviour is unchanged by the middleware.
+    expect(lang(page)).toBe('en');
+  });
+
+  it('mints a different nonce per request', async () => {
+    const a = nonceOf((await fetch(`${baseUrl}/`)).headers.get('content-security-policy'));
+    const b = nonceOf((await fetch(`${baseUrl}/`)).headers.get('content-security-policy'));
+    expect(a).toBeTruthy();
+    expect(a).not.toBe(b);
+  });
+
+  it('sends the static security headers, HSTS included (production)', async () => {
+    const res = await fetch(`${baseUrl}/wallet`, {
+      headers: { cookie: `${LOCALE_COOKIE_NAME}=pt-BR` },
+    });
+    expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(res.headers.get('referrer-policy')).toBe('strict-origin-when-cross-origin');
+    expect(res.headers.get('permissions-policy')).toBe('camera=(), microphone=(), geolocation=()');
+    expect(res.headers.get('x-frame-options')).toBe('DENY');
+    expect(res.headers.get('strict-transport-security')).toBe(
+      'max-age=31536000; includeSubDomains',
+    );
+    expect(lang(await res.text())).toBe('pt-BR');
   });
 });

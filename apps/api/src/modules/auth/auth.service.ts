@@ -16,6 +16,17 @@ const PASSWORD_COST = 12;
 const REFRESH_COST = 10;
 const VERIFY_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
+/**
+ * Login timing equaliser (Session 12, D4). An unknown email used to return
+ * 401 without running bcrypt, measurably faster than a known email with a
+ * wrong password — a timing oracle for "is this address registered". The
+ * unknown-email path now compares against this hash, which has the same cost
+ * (12) as every real password hash, so both 401 paths do one cost-12 compare.
+ * The plaintext is random and discarded: nothing can ever match it. Computed
+ * once, at module load.
+ */
+const DUMMY_PASSWORD_HASH = bcrypt.hashSync(randomBytes(32).toString('hex'), PASSWORD_COST);
+
 /** Prisma role enum values (uppercase) — kept local to avoid a runtime import. */
 type PrismaRole = 'ADMIN' | 'MODEL' | 'SUBSCRIBER';
 
@@ -135,6 +146,8 @@ export function createAuthService({ prisma, emailer }: AuthServiceDeps) {
     ): Promise<{ userId: string; role: Role; displayName: string }> {
       const user = await prisma.user.findUnique({ where: { email } });
       if (!user) {
+        // Same work as the wrong-password path, same answer (Session 12, D4).
+        await bcrypt.compare(password, DUMMY_PASSWORD_HASH);
         throw new AuthError(401, 'Invalid credentials');
       }
       const ok = await bcrypt.compare(password, user.passwordHash);

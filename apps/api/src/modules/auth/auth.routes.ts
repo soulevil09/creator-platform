@@ -81,6 +81,33 @@ const AUTHENTICATED_WRITE_RATE_LIMIT = {
     request.user?.userId ?? request.ip,
 };
 
+/**
+ * Session 12 (D3 inventory gap): `GET /me` had no limit at all. It is the
+ * session probe every page (and `AdminGate`) calls, so the budget is generous
+ * — 120/min per account — and, like every per-user limit, attached after
+ * `authenticate` so it keys on the caller.
+ */
+const AUTHENTICATED_READ_RATE_LIMIT = {
+  max: 120,
+  timeWindow: '1 minute',
+  keyGenerator: (request: { user?: { userId?: string }; ip: string }) =>
+    request.user?.userId ?? request.ip,
+};
+
+/**
+ * Session 12 (D3 inventory gaps) — the two pre-session public routes that had
+ * no limit. Nobody is authenticated yet, so the IP is the only key, and the
+ * `config.rateLimit` (onRequest) form is the right one — the same posture as
+ * register/login. With TRUST_PROXY set correctly (D1), the IP is the client.
+ *
+ *   verify-email: a person clicks one link, maybe a few times. The 256-bit
+ *     token is not guessable, so this bounds DB lookups, not brute force.
+ *   refresh: every open tab refreshes once per 15-minute access-token life,
+ *     and several people can share one NAT — hence 60 per 15 minutes.
+ */
+const VERIFY_EMAIL_RATE_LIMIT = { max: 30, timeWindow: '1 hour' };
+const REFRESH_RATE_LIMIT = { max: 60, timeWindow: '15 minutes' };
+
 export default async function authRoutes(
   app: FastifyInstance,
   opts: AuthRoutesOptions,
@@ -113,21 +140,25 @@ export default async function authRoutes(
   );
 
   // ── GET /verify-email ─────────────────────────────────────────────────────
-  app.get('/verify-email', async (request, reply) => {
-    const parsed = verifyEmailSchema.safeParse(request.query);
-    if (!parsed.success) {
-      return reply.code(400).send({ error: 'Invalid or expired verification token' });
-    }
-    try {
-      await service.verifyEmail(parsed.data.token);
-      return reply.code(200).send({ message: 'Email verified' });
-    } catch (err) {
-      if (err instanceof AuthError) {
-        return reply.code(err.status).send({ error: err.message });
+  app.get(
+    '/verify-email',
+    { config: { rateLimit: VERIFY_EMAIL_RATE_LIMIT } },
+    async (request, reply) => {
+      const parsed = verifyEmailSchema.safeParse(request.query);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: 'Invalid or expired verification token' });
       }
-      throw err;
-    }
-  });
+      try {
+        await service.verifyEmail(parsed.data.token);
+        return reply.code(200).send({ message: 'Email verified' });
+      } catch (err) {
+        if (err instanceof AuthError) {
+          return reply.code(err.status).send({ error: err.message });
+        }
+        throw err;
+      }
+    },
+  );
 
   // ── POST /login ───────────────────────────────────────────────────────────
   app.post(
@@ -156,7 +187,7 @@ export default async function authRoutes(
   );
 
   // ── POST /refresh ─────────────────────────────────────────────────────────
-  app.post('/refresh', async (request, reply) => {
+  app.post('/refresh', { config: { rateLimit: REFRESH_RATE_LIMIT } }, async (request, reply) => {
     const presented = request.cookies.refresh_token;
     if (!presented) {
       return reply.code(401).send({ error: 'Invalid refresh token' });
@@ -182,24 +213,32 @@ export default async function authRoutes(
   });
 
   // ── POST /logout (authenticated) ──────────────────────────────────────────
-  app.post('/logout', { preHandler: authenticate }, async (request, reply) => {
-    await service.clearRefreshToken(request.user.userId);
-    clearSession(reply);
-    return reply.code(200).send({ message: 'Logged out' });
-  });
+  app.post(
+    '/logout',
+    { preHandler: [authenticate, app.rateLimit(AUTHENTICATED_WRITE_RATE_LIMIT)] },
+    async (request, reply) => {
+      await service.clearRefreshToken(request.user.userId);
+      clearSession(reply);
+      return reply.code(200).send({ message: 'Logged out' });
+    },
+  );
 
   // ── GET /me (authenticated) ───────────────────────────────────────────────
-  app.get('/me', { preHandler: authenticate }, async (request, reply) => {
-    try {
-      const me = await service.getMe(request.user.userId);
-      return reply.code(200).send(me);
-    } catch (err) {
-      if (err instanceof AuthError) {
-        return reply.code(err.status).send({ error: err.message });
+  app.get(
+    '/me',
+    { preHandler: [authenticate, app.rateLimit(AUTHENTICATED_READ_RATE_LIMIT)] },
+    async (request, reply) => {
+      try {
+        const me = await service.getMe(request.user.userId);
+        return reply.code(200).send(me);
+      } catch (err) {
+        if (err instanceof AuthError) {
+          return reply.code(err.status).send({ error: err.message });
+        }
+        throw err;
       }
-      throw err;
-    }
-  });
+    },
+  );
 
   // ── PATCH /me/locale (authenticated, any role) ────────────────────────────
   // Strict: anything but an allowlisted locale is a 400, never coerced. The

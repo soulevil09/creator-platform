@@ -33,6 +33,26 @@ function sendError(reply: FastifyReply, err: unknown): FastifyReply {
 // MODEL-only guard reused by every route in this module.
 const modelOnly = { preHandler: [authenticate, authorize('model')] };
 
+/**
+ * Session 12 (D3 inventory gaps). Per model, attached after the role check
+ * (the Session 11.5 form) so a wrong-role caller never spends the budget.
+ *   read:   the profile read mints fresh signed URLs for every reference
+ *           image — 60/min is far above a dashboard's needs.
+ *   delete: mirrors the 20/hour upload budget; one delete per upload.
+ */
+const PROFILE_READ_RATE_LIMIT = {
+  max: 60,
+  timeWindow: '1 minute',
+  keyGenerator: (request: { user?: { userId?: string }; ip: string }) =>
+    request.user?.userId ?? request.ip,
+};
+const REFERENCE_DELETE_RATE_LIMIT = {
+  max: 20,
+  timeWindow: '1 hour',
+  keyGenerator: (request: { user?: { userId?: string }; ip: string }) =>
+    request.user?.userId ?? request.ip,
+};
+
 export default async function onboardingRoutes(
   app: FastifyInstance,
   opts: OnboardingRoutesOptions,
@@ -65,14 +85,18 @@ export default async function onboardingRoutes(
   );
 
   // ── GET /profile ──────────────────────────────────────────────────────────
-  app.get('/profile', { ...modelOnly }, async (request, reply) => {
-    try {
-      const profile = await service.getProfile(request.user.userId);
-      return reply.code(200).send(profile);
-    } catch (err) {
-      return sendError(reply, err);
-    }
-  });
+  app.get(
+    '/profile',
+    { preHandler: [...modelOnly.preHandler, app.rateLimit(PROFILE_READ_RATE_LIMIT)] },
+    async (request, reply) => {
+      try {
+        const profile = await service.getProfile(request.user.userId);
+        return reply.code(200).send(profile);
+      } catch (err) {
+        return sendError(reply, err);
+      }
+    },
+  );
 
   // ── POST /consent ─────────────────────────────────────────────────────────
   app.post(
@@ -118,14 +142,10 @@ export default async function onboardingRoutes(
       // bytes and require the declared Content-Type to match what we detected.
       const detected = await fileTypeFromBuffer(buffer);
       if (!detected || !ALLOWED_IMAGE_TYPES.has(detected.mime)) {
-        return reply
-          .code(400)
-          .send({ error: 'Unsupported image type (allowed: jpeg, png, webp)' });
+        return reply.code(400).send({ error: 'Unsupported image type (allowed: jpeg, png, webp)' });
       }
       if (part.mimetype !== detected.mime) {
-        return reply
-          .code(400)
-          .send({ error: 'Content-Type does not match file contents' });
+        return reply.code(400).send({ error: 'Content-Type does not match file contents' });
       }
 
       try {
@@ -145,7 +165,7 @@ export default async function onboardingRoutes(
   // ── DELETE /reference-images/:imageId ─────────────────────────────────────
   app.delete<{ Params: { imageId: string } }>(
     '/reference-images/:imageId',
-    { ...modelOnly },
+    { preHandler: [...modelOnly.preHandler, app.rateLimit(REFERENCE_DELETE_RATE_LIMIT)] },
     async (request, reply) => {
       try {
         await service.deleteReferenceImage(request.user.userId, request.params.imageId);

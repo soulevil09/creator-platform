@@ -41,6 +41,20 @@ export interface MessagingWsOptions extends FastifyPluginOptions {
   connections: ConnectionRegistry;
 }
 
+/**
+ * Session 12 (D3 inventory gap): upgrade attempts per user. The concurrent cap
+ * (MAX_CONNECTIONS_PER_USER) bounds open sockets, not how fast a client may
+ * dial — a reconnect loop would otherwise cost a JWT verify and a handshake
+ * per iteration without limit. 30/min leaves room for honest reconnects after
+ * network drops. Placed after `authenticate`, so it keys on the user.
+ */
+const UPGRADE_RATE_LIMIT = {
+  max: 30,
+  timeWindow: '1 minute',
+  keyGenerator: (request: { user?: { userId?: string }; ip: string }) =>
+    request.user?.userId ?? request.ip,
+};
+
 export default async function messagingWsRoutes(
   app: FastifyInstance,
   opts: MessagingWsOptions,
@@ -53,7 +67,7 @@ export default async function messagingWsRoutes(
       websocket: true,
       // Runs before the handshake is completed: a request without a valid
       // access-token cookie gets 401 and no socket is ever opened.
-      preValidation: [authenticate],
+      preValidation: [authenticate, app.rateLimit(UPGRADE_RATE_LIMIT)],
     },
     (socket, request) => {
       const { userId } = request.user;

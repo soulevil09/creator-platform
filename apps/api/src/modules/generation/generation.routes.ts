@@ -57,6 +57,18 @@ function sendError(reply: FastifyReply, err: unknown): FastifyReply {
 
 const subscriberOnly = { preHandler: [authenticate, authorize('subscriber')] };
 
+/**
+ * Session 12 (D3 inventory gaps): the four reads had no limit. Same budget
+ * and key as the messaging reads (120/min per caller). The image read
+ * watermarks on the fly and writes a trace row, like content serve.
+ */
+const READ_RATE_LIMIT = {
+  max: 120,
+  timeWindow: '1 minute',
+  keyGenerator: (request: { user?: { userId?: string }; ip: string }) =>
+    request.user?.userId ?? request.ip,
+};
+
 export default async function generationRoutes(
   app: FastifyInstance,
   opts: GenerationRoutesOptions,
@@ -69,9 +81,17 @@ export default async function generationRoutes(
   // needs it; keeping it behind the cookie costs a legitimate client nothing
   // and gives an unauthenticated scraper nothing — the same posture as
   // GET /api/wallet/balance. Loosen to public if a marketing page ever needs it.
-  app.get('/presets', { preHandler: [authenticate] }, async (_request, reply) => {
-    return reply.code(200).send({ presets: service.listPresets() });
-  });
+  app.get(
+    '/presets',
+    { preHandler: [authenticate, app.rateLimit(READ_RATE_LIMIT)] },
+    async (_request, reply) => {
+      return reply.code(200).send({ presets: service.listPresets() });
+    },
+  );
+
+  const subscriberRead = {
+    preHandler: [...subscriberOnly.preHandler, app.rateLimit(READ_RATE_LIMIT)],
+  };
 
   // ── POST / ────────────────────────────────────────────────────────────────
   app.post(
@@ -94,7 +114,7 @@ export default async function generationRoutes(
   );
 
   // ── GET / ─────────────────────────────────────────────────────────────────
-  app.get('/', subscriberOnly, async (request, reply) => {
+  app.get('/', subscriberRead, async (request, reply) => {
     const query = generationListQuerySchema.safeParse(request.query);
     if (!query.success) {
       return reply.code(400).send({ error: 'invalid_query', details: query.error.flatten() });
@@ -104,7 +124,7 @@ export default async function generationRoutes(
   });
 
   // ── GET /:id ──────────────────────────────────────────────────────────────
-  app.get<{ Params: { id: string } }>('/:id', subscriberOnly, async (request, reply) => {
+  app.get<{ Params: { id: string } }>('/:id', subscriberRead, async (request, reply) => {
     const params = generationIdParamsSchema.safeParse(request.params);
     if (!params.success) {
       return reply.code(400).send({ error: 'invalid_input', details: params.error.flatten() });
@@ -118,7 +138,7 @@ export default async function generationRoutes(
   });
 
   // ── GET /:id/image ────────────────────────────────────────────────────────
-  app.get<{ Params: { id: string } }>('/:id/image', subscriberOnly, async (request, reply) => {
+  app.get<{ Params: { id: string } }>('/:id/image', subscriberRead, async (request, reply) => {
     const params = generationIdParamsSchema.safeParse(request.params);
     if (!params.success) {
       return reply.code(400).send({ error: 'invalid_input', details: params.error.flatten() });

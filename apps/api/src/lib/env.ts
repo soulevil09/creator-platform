@@ -7,6 +7,7 @@
 // "if JWT_SECRET, JWT_REFRESH_SECRET, or EMAIL_API_KEY are missing → throw and
 // exit". No secret is ever logged.
 // =============================================================================
+import { isIP } from 'node:net';
 import {
   DEFAULT_PAYOUT_MIN_THRESHOLD_CENTS,
   DEFAULT_REVENUE_SHARE_MODEL_PCT,
@@ -95,6 +96,61 @@ function requiredMinLength(name: string, minLength: number): string {
   return value;
 }
 
+/** What Fastify's `trustProxy` option receives. `true` is deliberately not a member. */
+export type TrustProxySetting = false | number | string[];
+
+/** An IPv4/IPv6 address, optionally with a `/prefix` — what proxy-addr accepts. */
+function isAddressOrCidr(value: string): boolean {
+  const [address, prefix, ...rest] = value.split('/');
+  if (rest.length > 0 || isIP(address) === 0) return false;
+  if (prefix === undefined) return true;
+  const bits = Number(prefix);
+  const max = isIP(address) === 4 ? 32 : 128;
+  return /^\d+$/.test(prefix) && bits >= 0 && bits <= max;
+}
+
+/**
+ * `TRUST_PROXY` (Session 12, D1) → Fastify's `trustProxy`.
+ *
+ *   unset / "false" / "0" → false: `request.ip` is the socket address and
+ *                           `X-Forwarded-For` is ignored entirely.
+ *   "1", "2", …           → trust that many proxy hops from the socket.
+ *   "10.0.0.0/8, ::1"     → trust only those proxy addresses/CIDRs.
+ *
+ * `"true"` is rejected at boot rather than accepted: trusting every hop lets
+ * any client write its own `X-Forwarded-For` and earn a fresh IP-scoped rate
+ * budget on register/login with each request.
+ */
+export function parseTrustProxy(raw: string | undefined): TrustProxySetting {
+  const value = (raw ?? '').trim();
+  if (value === '' || value.toLowerCase() === 'false' || value === '0') return false;
+  if (value.toLowerCase() === 'true') {
+    throw new Error(
+      '[env] TRUST_PROXY=true is not allowed: it lets any client spoof X-Forwarded-For. ' +
+        'Use a hop count (e.g. 1) or the proxy addresses/CIDRs.',
+    );
+  }
+  if (/^\d+$/.test(value)) {
+    const hops = Number(value);
+    if (hops > 10) {
+      throw new Error(`[env] TRUST_PROXY="${value}" must be a hop count between 0 and 10.`);
+    }
+    return hops;
+  }
+  const entries = value
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== '');
+  const invalid = entries.filter((entry) => !isAddressOrCidr(entry));
+  if (entries.length === 0 || invalid.length > 0) {
+    throw new Error(
+      `[env] TRUST_PROXY must be false, a hop count, or a comma-separated list of IPs/CIDRs ` +
+        `(invalid: ${invalid.join(', ') || '(empty)'}).`,
+    );
+  }
+  return entries;
+}
+
 const NODE_ENV = process.env.NODE_ENV ?? 'development';
 
 /** Adapter used when `AI_PROVIDER` is unset (mirrors the payments/payouts defaults). */
@@ -110,6 +166,39 @@ const DEFAULT_GENERATION_TIMEOUT_MS = 90_000;
 
 /** 30 days — long enough to come back for the image, short enough to bound storage. */
 const DEFAULT_GENERATION_IMAGE_RETENTION_DAYS = 30;
+
+const GENERATION_TIMEOUT_MS = integerInRange(
+  'GENERATION_TIMEOUT_MS',
+  DEFAULT_GENERATION_TIMEOUT_MS,
+  1_000,
+  600_000,
+);
+
+/**
+ * Age past which a PENDING GenerationJob is treated as abandoned by the
+ * reconciliation sweep (Session 12, D6). Default 2× the generation timeout.
+ * It must exceed the timeout: the live request's success path completes the
+ * job with a plain update, so reconciling a job whose request is still inside
+ * its budget could refund credits for an image that then completes.
+ */
+function generationStaleAfterMs(): number {
+  const value = integerInRange(
+    'GENERATION_STALE_AFTER_MS',
+    2 * GENERATION_TIMEOUT_MS,
+    2_000,
+    24 * 60 * 60 * 1000,
+  );
+  if (value <= GENERATION_TIMEOUT_MS) {
+    throw new Error(
+      `[env] GENERATION_STALE_AFTER_MS (${value}) must be greater than ` +
+        `GENERATION_TIMEOUT_MS (${GENERATION_TIMEOUT_MS}).`,
+    );
+  }
+  return value;
+}
+
+/** 72 h — three days without an IPN before a payout is flagged for a human. */
+const DEFAULT_PAYOUT_STALE_AFTER_HOURS = 72;
 
 export const env = {
   NODE_ENV,
@@ -241,12 +330,7 @@ export const env = {
    * The request holds a connection open for this long at most; past it the
    * prediction is cancelled, the job is FAILED and the credits are refunded.
    */
-  GENERATION_TIMEOUT_MS: integerInRange(
-    'GENERATION_TIMEOUT_MS',
-    DEFAULT_GENERATION_TIMEOUT_MS,
-    1_000,
-    600_000,
-  ),
+  GENERATION_TIMEOUT_MS,
 
   /** Days a completed image stays servable before `expiresAt` cuts it off. */
   GENERATION_IMAGE_RETENTION_DAYS: integerInRange(
@@ -274,6 +358,32 @@ export const env = {
    * can never become an open endpoint, compared in constant time, never echoed.
    */
   STORAGE_CLEANUP_CRON_SECRET: requiredInProduction('STORAGE_CLEANUP_CRON_SECRET', NODE_ENV),
+
+  // ─── Security hardening & reconciliation (Session 12) ────────────────────
+  /**
+   * Fastify `trustProxy`. Default false; never `true` — see `parseTrustProxy`.
+   * Set it to the real hop count (or proxy CIDRs) of the deployment so
+   * `request.ip`, and every IP-scoped rate limit keyed on it, is the client.
+   */
+  TRUST_PROXY: parseTrustProxy(process.env.TRUST_PROXY),
+
+  /**
+   * Shared secret for POST /api/admin/reconciliation/run, called by the daily
+   * GitHub Actions cron job — the same posture as the other cron secrets:
+   * required in production, compared in constant time, never echoed.
+   */
+  RECONCILIATION_CRON_SECRET: requiredInProduction('RECONCILIATION_CRON_SECRET', NODE_ENV),
+
+  /** PENDING generations older than this are refunded + FAILED by the sweep. */
+  GENERATION_STALE_AFTER_MS: generationStaleAfterMs(),
+
+  /** PENDING/PROCESSING payouts older than this are flagged (never resolved). */
+  PAYOUT_STALE_AFTER_HOURS: integerInRange(
+    'PAYOUT_STALE_AFTER_HOURS',
+    DEFAULT_PAYOUT_STALE_AFTER_HOURS,
+    1,
+    24 * 90,
+  ),
 
   // Tunables with safe defaults.
   JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN ?? '15m',

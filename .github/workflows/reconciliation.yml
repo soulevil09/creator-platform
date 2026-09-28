@@ -1,0 +1,53 @@
+# Daily reconciliation sweep (Session 12, D6).
+#
+# Same shape as storage-cleanup.yml / subscription-renewals.yml: the logic
+# (refund stale PENDING generations, flag payouts whose IPN never arrived)
+# lives in the API behind one service, so this workflow only says "now".
+#
+# Auth is the shared secret `RECONCILIATION_CRON_SECRET`, compared in constant
+# time by the endpoint before any database access. Both secrets live in GitHub
+# Actions repository secrets and are never echoed: `curl` reads the header
+# value from the environment, so it never appears in the run log.
+#
+# No request body and therefore no Content-Type header: Fastify parses a
+# declared `application/json` body before the route runs, and an empty one is
+# a 400.
+name: Reconciliation
+
+on:
+  schedule:
+    # Daily at 07:30 UTC — after the storage cleanup at 07:00, so the sweeps
+    # never contend. Best-effort cron is fine: the sweep is idempotent (a CAS
+    # per generation, one flag per payout per UTC day).
+    - cron: '30 7 * * *'
+  # Manual trigger for a missed day or an incident.
+  workflow_dispatch:
+
+# Never let two runs overlap. The compare-and-set makes an overlap harmless,
+# but there is no reason to make the database arbitrate.
+concurrency:
+  group: reconciliation
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    name: Trigger reconciliation sweep
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /api/admin/reconciliation/run
+        env:
+          API_PUBLIC_URL: ${{ secrets.API_PUBLIC_URL }}
+          RECONCILIATION_CRON_SECRET: ${{ secrets.RECONCILIATION_CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "${API_PUBLIC_URL}" ] || [ -z "${RECONCILIATION_CRON_SECRET}" ]; then
+            echo "::error::API_PUBLIC_URL and RECONCILIATION_CRON_SECRET must be set as repository secrets."
+            exit 1
+          fi
+          # --fail-with-body so a non-2xx turns the run red while still
+          # printing what the API said. The body carries aggregate counts only.
+          curl --silent --show-error --fail-with-body \
+            --max-time 600 \
+            -X POST "${API_PUBLIC_URL}/api/admin/reconciliation/run" \
+            -H "X-Reconciliation-Cron-Secret: ${RECONCILIATION_CRON_SECRET}" \
+            | tee "$GITHUB_STEP_SUMMARY"

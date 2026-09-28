@@ -16,6 +16,7 @@
 // check runs before any database access, so a wrong secret costs one buffer
 // comparison. A blank configured secret is a rejection, not an open door.
 import { timingSafeEqual } from 'node:crypto';
+import { errorCodes } from 'fastify';
 import type { FastifyInstance, FastifyPluginOptions, FastifyReply, FastifyRequest } from 'fastify';
 import { env } from '../../lib/env.js';
 import { authenticate, authorize } from '../../middleware/auth.js';
@@ -73,8 +74,10 @@ export default async function payoutRoutes(
       }
       try {
         done(null, JSON.parse(body.toString('utf8')));
-      } catch (err) {
-        done(err as Error, undefined);
+      } catch {
+        // Fastify's own invalid-JSON error (400) rather than the SyntaxError,
+        // whose message quotes the body (Session 12 error surface).
+        done(new errorCodes.FST_ERR_CTP_INVALID_JSON_BODY(), undefined);
       }
     },
   );

@@ -2,6 +2,7 @@ import 'dotenv/config';
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import cookie from '@fastify/cookie';
+import helmet from '@fastify/helmet';
 import jwt from '@fastify/jwt';
 import rateLimit from '@fastify/rate-limit';
 import multipart from '@fastify/multipart';
@@ -12,7 +13,10 @@ import {
   SUPPORTED_LOCALES,
   type PaymentChannel,
 } from '@creator-platform/shared';
-import { env } from './lib/env.js';
+import { env, type TrustProxySetting } from './lib/env.js';
+import { authenticate } from './middleware/auth.js';
+import { installErrorHandling } from './security/error-handler.js';
+import { installRouteInventory } from './security/route-inventory.js';
 import { prisma as defaultPrisma, type PrismaClient } from './lib/prisma.js';
 import { createResendEmailer, type Emailer } from './lib/email.js';
 import { createS3StorageClient, type StorageClient } from './lib/storage.js';
@@ -57,9 +61,22 @@ import { createStorageCleanupService } from './modules/storage-cleanup/storage-c
 import storageCleanupRoutes from './modules/storage-cleanup/storage-cleanup.routes.js';
 import { createAdminService } from './modules/admin/admin.service.js';
 import adminRoutes from './modules/admin/admin.routes.js';
+import { createReconciliationService } from './modules/reconciliation/reconciliation.service.js';
+import reconciliationRoutes from './modules/reconciliation/reconciliation.routes.js';
 
 /** Max reference-image upload size, shared by the multipart limit (10 MB). */
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+
+/**
+ * Global ceiling for parsed (JSON) bodies — Session 12, D1. Every JSON payload
+ * this API accepts is a few hundred bytes; 1 MB is headroom, not a target.
+ * Multipart uploads are streamed by @fastify/multipart and bounded by their
+ * own per-route `fileSize` limits, which this does not touch.
+ */
+const JSON_BODY_LIMIT_BYTES = 1024 * 1024;
+
+/** HSTS: one year, subdomains included. Sent only in production (see D2). */
+const HSTS_MAX_AGE_SECONDS = 31_536_000;
 
 const PORT = Number(process.env.API_PORT ?? process.env.PORT ?? 4000);
 
@@ -78,6 +95,10 @@ export interface BuildServerOptions {
   getPayoutProvider?: () => IPayoutProvider;
   /** Override the AI-provider factory (tests inject the mock or a stub adapter). */
   getAIProvider?: () => IAIProvider;
+  /** Override `TRUST_PROXY` (tests exercise both the trusted and untrusted setting). */
+  trustProxy?: TrustProxySetting;
+  /** Override "send HSTS" (defaults to `env.isProduction`; tests exercise both). */
+  hsts?: boolean;
 }
 
 export async function buildServer(opts: BuildServerOptions = {}) {
@@ -110,7 +131,13 @@ export async function buildServer(opts: BuildServerOptions = {}) {
   // disclosure, not a debugging convenience. Fastify logs no request body by
   // default; `redact` makes that explicit and survives anyone later adding a
   // body-logging serializer or logging a request object directly.
+  //
+  // `trustProxy` (Session 12, D1) comes from TRUST_PROXY and is never `true`:
+  // trusting every hop would let any client write its own X-Forwarded-For and
+  // pick the `request.ip` every IP-scoped rate limit keys on.
   const app = Fastify({
+    trustProxy: opts.trustProxy ?? env.TRUST_PROXY,
+    bodyLimit: JSON_BODY_LIMIT_BYTES,
     logger:
       env.NODE_ENV !== 'test'
         ? {
@@ -122,29 +149,68 @@ export async function buildServer(opts: BuildServerOptions = {}) {
         : false,
   });
 
+  // ── Error surface (Session 12, D2) ────────────────────────────────────────
+  // Installed on the root before any plugin, so every route inherits it: a 5xx
+  // never carries a message, a stack, or a Prisma/provider string.
+  installErrorHandling(app);
+
   // CORS: browser requests only from the configured app origin, with cookies.
   await app.register(cors, { origin: env.APP_URL, credentials: true });
+
+  // Security headers (Session 12, D2). @fastify/helmet over hand-set headers:
+  // it is the maintained Fastify binding of `helmet`, applies to every reply
+  // (404s and errors included) from one hook, and keeps each header's syntax
+  // someone else's tested problem. The API serves JSON, image bytes and one
+  // WebSocket upgrade — no HTML — so the CSP forbids everything.
+  // CORP `same-site` still lets the web origin load the watermarked image
+  // streams: web and API share a registrable domain (localhost:3000/:4000 in
+  // development, app./api. subdomains when deployed).
+  await app.register(helmet, {
+    contentSecurityPolicy: {
+      useDefaults: false,
+      directives: { defaultSrc: ["'none'"], frameAncestors: ["'none'"] },
+    },
+    frameguard: { action: 'deny' },
+    referrerPolicy: { policy: 'no-referrer' },
+    crossOriginResourcePolicy: { policy: 'same-site' },
+    hsts:
+      (opts.hsts ?? env.isProduction)
+        ? { maxAge: HSTS_MAX_AGE_SECONDS, includeSubDomains: true, preload: false }
+        : false,
+  });
 
   // Cookie parsing must come before JWT (JWT reads tokens from cookies).
   await app.register(cookie);
 
   // Two namespaced JWT instances — separate secrets + cookies for access vs
   // refresh tokens. Gives reply.accessJwtSign / request.accessJwtVerify, etc.
+  //
+  // Both pin HS256 for signing AND verification (Session 12, D4). With a
+  // string secret the verifier would otherwise accept any HS* algorithm the
+  // token's header names; pinning it removes algorithm choice from the
+  // attacker entirely.
   await app.register(jwt, {
     namespace: 'access',
     secret: env.JWT_SECRET,
     cookie: { cookieName: 'access_token', signed: false },
-    sign: { expiresIn: env.JWT_EXPIRES_IN },
+    sign: { algorithm: 'HS256', expiresIn: env.JWT_EXPIRES_IN },
+    verify: { algorithms: ['HS256'] },
   });
   await app.register(jwt, {
     namespace: 'refresh',
     secret: env.JWT_REFRESH_SECRET,
     cookie: { cookieName: 'refresh_token', signed: false },
-    sign: { expiresIn: env.JWT_REFRESH_EXPIRES_IN },
+    sign: { algorithm: 'HS256', expiresIn: env.JWT_REFRESH_EXPIRES_IN },
+    verify: { algorithms: ['HS256'] },
   });
 
   // Rate limiting is opt-in per route (register/login set their own limits).
   await app.register(rateLimit, { global: false });
+
+  // Route security inventory (Session 12, D3). Installed after the rate-limit
+  // plugin (it wraps `app.rateLimit` to recognise its handlers) and before any
+  // route, so it sees every one. Registration-time only; nothing per request.
+  installRouteInventory(app, { authenticate });
 
   // Multipart uploads (reference images). attachFieldsToBody:false keeps the
   // raw stream available so routes pull the single file via request.file()
@@ -304,8 +370,24 @@ export async function buildServer(opts: BuildServerOptions = {}) {
     setPublish: contentService.setPublish,
     runPayouts: payoutsService.runPayouts,
     payoutMinThresholdCents: env.PAYOUT_MIN_THRESHOLD_CENTS,
+    payoutStaleAfterHours: env.PAYOUT_STALE_AFTER_HOURS,
   });
   await app.register(adminRoutes, { prefix: '/api/admin', service: adminService });
+
+  // ── Reconciliation (Session 12, D6) ───────────────────────────────────────
+  // Daily cron sweep for the two "stuck" states earlier sessions deferred:
+  // PENDING generations abandoned by a crash (refunded through the wallet's
+  // own `addCredits`) and payouts whose IPN never arrived (flagged only).
+  const reconciliationService = createReconciliationService({
+    prisma,
+    wallet: walletService,
+    generationStaleAfterMs: env.GENERATION_STALE_AFTER_MS,
+    payoutStaleAfterHours: env.PAYOUT_STALE_AFTER_HOURS,
+  });
+  await app.register(reconciliationRoutes, {
+    prefix: '/api/admin/reconciliation',
+    service: reconciliationService,
+  });
 
   return app;
 }

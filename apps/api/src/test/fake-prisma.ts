@@ -365,18 +365,12 @@ export function createFakePrisma() {
     return true;
   };
 
-  const payoutMatches = (p: FakePayout, where: Where): boolean => {
-    for (const [key, condition] of Object.entries(where)) {
-      const value = (p as unknown as Record<string, unknown>)[key];
-      if (condition !== null && typeof condition === 'object' && !(condition instanceof Date)) {
-        const op = condition as { in?: unknown[] };
-        if (Array.isArray(op.in) && !op.in.includes(value)) return false;
-        continue;
-      }
-      if (value !== condition) return false;
-    }
-    return true;
-  };
+  /**
+   * `{ in }` on status plus — since Session 12's reconciliation sweep — date
+   * bounds on `createdAt` and the `id > cursor` keyset predicate, which is
+   * exactly the generic `rowMatches` set.
+   */
+  const payoutMatches = (p: FakePayout, where: Where): boolean => rowMatches(p, where);
 
   /**
    * Match a message against the `where` shapes the messaging module issues:
@@ -905,7 +899,24 @@ export function createFakePrisma() {
         where,
         skip = 0,
         take,
-      }: { where?: Where; orderBy?: unknown; skip?: number; take?: number } = {}) => {
+        orderBy,
+        select,
+      }: {
+        where?: Where;
+        orderBy?: Record<string, 'asc' | 'desc'>;
+        skip?: number;
+        take?: number;
+        select?: unknown;
+      } = {}) => {
+        track('payout.findMany');
+        // Session 12: the reconciliation sweep's `(id ASC)` keyset walk.
+        if (orderBy && 'id' in orderBy) {
+          void select;
+          return paginate(
+            payouts.filter((p) => (where ? payoutMatches(p, where) : true)),
+            { orderBy, take },
+          );
+        }
         const matched = payouts
           .filter((p) => (where ? payoutMatches(p, where) : true))
           // Only the `createdAt: 'desc'` ordering the listing endpoint uses.
@@ -913,8 +924,10 @@ export function createFakePrisma() {
           .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
         return matched.slice(skip, take === undefined ? undefined : skip + take);
       },
-      count: async ({ where }: { where?: Where } = {}) =>
-        payouts.filter((p) => (where ? payoutMatches(p, where) : true)).length,
+      count: async ({ where }: { where?: Where } = {}) => {
+        track('payout.count');
+        return payouts.filter((p) => (where ? payoutMatches(p, where) : true)).length;
+      },
       update: async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
         const row = payouts.find((p) => p.id === where.id);
         if (!row) throw new Error('record not found');
@@ -1023,11 +1036,17 @@ export function createFakePrisma() {
 
     auditLog: {
       create: async ({ data }: { data: Partial<FakeAudit> }) => {
+        track('auditLog.create');
+        // A caller-chosen id is a primary key like any other: the Session 12
+        // stale-payout flag relies on a duplicate (payout, day) id failing.
+        if (data.id !== undefined && auditLogs.some((l) => l.id === data.id)) {
+          throw new FakeUniqueConstraintError('id');
+        }
         const row = {
           actorId: null,
           metadata: null,
           ...data,
-          id: nextId('log'),
+          id: data.id ?? nextId('log'),
           createdAt: new Date(),
         } as FakeAudit;
         auditLogs.push(row);

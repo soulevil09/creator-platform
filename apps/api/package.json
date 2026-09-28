@@ -10,6 +10,7 @@
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
+    "load": "tsx scripts/load/run.ts",
     "prisma:generate": "prisma generate",
     "prisma:studio": "prisma studio",
     "postinstall": "node ./scripts/postinstall.mjs"
@@ -20,6 +21,7 @@
     "@creator-platform/shared": "workspace:*",
     "@fastify/cookie": "^11.0.2",
     "@fastify/cors": "^10.1.0",
+    "@fastify/helmet": "^13.1.1",
     "@fastify/jwt": "^10.1.0",
     "@fastify/multipart": "^10.0.0",
     "@fastify/rate-limit": "^11.0.0",
@@ -31,12 +33,14 @@
     "fastify": "^5.8.5",
     "file-type": "^22.0.1",
     "resend": "^6.14.0",
-    "sharp": "^0.35.2",
+    "sharp": "^0.35.5",
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@types/autocannon": "^7.12.7",
     "@types/node": "^20.14.0",
     "@types/ws": "^8.18.1",
+    "autocannon": "^8.0.0",
     "nock": "^14.0.17",
     "prisma": "^5.18.0",
     "tsx": "^4.16.0",

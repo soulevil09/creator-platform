@@ -12,6 +12,7 @@
 //      duplicate delivery or an unknown correlation id answers 200 (there is
 //      nothing a retry could fix), while a bad signature answers 400 and a
 //      genuine server fault answers 500 so the provider does retry.
+import { errorCodes } from 'fastify';
 import type { FastifyInstance, FastifyPluginOptions, FastifyReply } from 'fastify';
 import type { PaymentChannel } from '@creator-platform/shared';
 import { authenticate, authorize } from '../../middleware/auth.js';
@@ -70,8 +71,10 @@ export default async function paymentRoutes(
       }
       try {
         done(null, JSON.parse(body.toString('utf8')));
-      } catch (err) {
-        done(err as Error, undefined);
+      } catch {
+        // Fastify's own invalid-JSON error (400) rather than the SyntaxError,
+        // whose message quotes the body (Session 12 error surface).
+        done(new errorCodes.FST_ERR_CTP_INVALID_JSON_BODY(), undefined);
       }
     },
   );

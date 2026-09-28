@@ -13,6 +13,13 @@ declare module '@fastify/jwt' {
     payload: JwtPayload;
     user: JwtPayload;
   }
+  // A namespaced registration also hangs its signer/verifier off
+  // `fastify.jwt[namespace]` — used by the Session 12 tests and load harness
+  // to mint a token without a login round-trip.
+  interface JWT {
+    access: JWT;
+    refresh: JWT;
+  }
 }
 
 declare module 'fastify' {

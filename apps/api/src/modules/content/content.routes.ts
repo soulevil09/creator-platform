@@ -6,12 +6,7 @@
 // The service returns only signed URLs or watermarked bytes, and these handlers
 // pass those through verbatim.
 import { fileTypeFromBuffer } from 'file-type';
-import type {
-  FastifyInstance,
-  FastifyPluginOptions,
-  FastifyReply,
-  FastifyRequest,
-} from 'fastify';
+import type { FastifyInstance, FastifyPluginOptions, FastifyReply, FastifyRequest } from 'fastify';
 import { authenticate, authorize } from '../../middleware/auth.js';
 import { ContentError, type ContentService } from './content.service.js';
 import {
@@ -73,6 +68,33 @@ const REPORT_RATE_LIMIT = {
   timeWindow: '1 hour',
   keyGenerator: (request: FastifyRequest) => request.user?.userId ?? request.ip,
 };
+
+/**
+ * Session 12 (D3 inventory gaps) — per caller, attached after auth/role:
+ *   serve:   every view watermarks on the fly (sharp CPU) and writes an
+ *            AuditLog trace row, so it must not be free; 120/min still lets a
+ *            gallery page load dozens of items at once.
+ *   manage:  publish toggle + soft delete, a model curating a catalogue (or an
+ *            admin moderating) — 60/min.
+ */
+const SERVE_RATE_LIMIT = {
+  max: 120,
+  timeWindow: '1 minute',
+  keyGenerator: (request: FastifyRequest) => request.user?.userId ?? request.ip,
+};
+const MANAGE_RATE_LIMIT = {
+  max: 60,
+  timeWindow: '1 minute',
+  keyGenerator: (request: FastifyRequest) => request.user?.userId ?? request.ip,
+};
+
+/**
+ * The public catalogue listing is the one route here with no authenticated
+ * caller to key on (anonymous visitors see FREE items), so it is IP-scoped
+ * through `config.rateLimit`, like register/login. It mints signed thumbnail
+ * URLs per item, hence a budget rather than none.
+ */
+const PUBLIC_LIST_RATE_LIMIT = { max: 120, timeWindow: '1 minute' };
 
 export default async function contentRoutes(
   app: FastifyInstance,
@@ -181,7 +203,9 @@ export default async function contentRoutes(
   // nowhere else.
   app.patch<{ Params: { contentId: string } }>(
     '/:contentId/publish',
-    { preHandler: [authenticate, authorize('model', 'admin')] },
+    {
+      preHandler: [authenticate, authorize('model', 'admin'), app.rateLimit(MANAGE_RATE_LIMIT)],
+    },
     async (request, reply) => {
       const parsed = publishSchema.safeParse(request.body);
       if (!parsed.success) {
@@ -228,7 +252,7 @@ export default async function contentRoutes(
   // ── GET /model/:modelId (optional auth) ───────────────────────────────────
   app.get<{ Params: { modelId: string } }>(
     '/model/:modelId',
-    { preHandler: [optionalAuthenticate] },
+    { preHandler: [optionalAuthenticate], config: { rateLimit: PUBLIC_LIST_RATE_LIMIT } },
     async (request, reply) => {
       const parsed = listQuerySchema.safeParse(request.query);
       if (!parsed.success) {
@@ -238,7 +262,11 @@ export default async function contentRoutes(
         ? { userId: request.user.userId, role: request.user.role }
         : {};
       try {
-        const result = await service.listModelContent(request.params.modelId, requester, parsed.data);
+        const result = await service.listModelContent(
+          request.params.modelId,
+          requester,
+          parsed.data,
+        );
         return reply.code(200).send(result);
       } catch (err) {
         return sendError(reply, err);
@@ -249,7 +277,7 @@ export default async function contentRoutes(
   // ── GET /:contentId/serve (authenticated) ─────────────────────────────────
   app.get<{ Params: { contentId: string } }>(
     '/:contentId/serve',
-    { preHandler: [authenticate] },
+    { preHandler: [authenticate, app.rateLimit(SERVE_RATE_LIMIT)] },
     async (request, reply) => {
       try {
         const result = await service.serve(request.params.contentId, {
@@ -281,14 +309,12 @@ export default async function contentRoutes(
   // ── DELETE /:contentId (model or admin) ───────────────────────────────────
   app.delete<{ Params: { contentId: string } }>(
     '/:contentId',
-    { preHandler: [authenticate, authorize('model', 'admin')] },
+    {
+      preHandler: [authenticate, authorize('model', 'admin'), app.rateLimit(MANAGE_RATE_LIMIT)],
+    },
     async (request, reply) => {
       try {
-        await service.softDelete(
-          request.user.userId,
-          request.user.role,
-          request.params.contentId,
-        );
+        await service.softDelete(request.user.userId, request.user.role, request.params.contentId);
         return reply.code(204).send();
       } catch (err) {
         return sendError(reply, err);

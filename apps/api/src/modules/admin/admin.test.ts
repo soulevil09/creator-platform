@@ -704,6 +704,8 @@ describe('D3 — GET /api/admin/metrics/overview', () => {
       ],
       modelsAboveThresholdWithoutPayoutEmail: 1,
       thresholdCents: 5000,
+      // Session 12 (additive): the PENDING payout above is fresh, not stale.
+      stalePayouts: 0,
     });
     // No figure anywhere is a cross-currency total.
     expect(JSON.stringify(body)).not.toContain('"totalCents"');
@@ -740,6 +742,8 @@ describe('D3 — GET /api/admin/metrics/overview', () => {
       'generationJob.groupBy': 1,
       'payout.groupBy': 1,
       'modelProfile.count': 1,
+      // Session 12: the stale-payout count — exactly one added query.
+      'payout.count': 1,
     });
   });
 });
@@ -1083,6 +1087,7 @@ describe('D5 — content moderation', () => {
       setPublish,
       runPayouts: vi.fn(async () => ({ processed: 0, skipped: 0, failed: 0, totalCents: 0 })),
       payoutMinThresholdCents: 5000,
+      payoutStaleAfterHours: 72,
     });
     const { reportId } = (await report(subscriber.access)).json();
 

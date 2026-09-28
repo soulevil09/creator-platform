@@ -123,6 +123,8 @@ export interface AdminServiceDeps {
   runPayouts: PayoutsService['runPayouts'];
   /** `PAYOUT_MIN_THRESHOLD_CENTS`, for the "above threshold, no destination" count. */
   payoutMinThresholdCents: number;
+  /** `PAYOUT_STALE_AFTER_HOURS` — same cutoff the reconciliation sweep flags (Session 12). */
+  payoutStaleAfterHours: number;
 }
 
 export function createAdminService({
@@ -132,6 +134,7 @@ export function createAdminService({
   setPublish,
   runPayouts,
   payoutMinThresholdCents,
+  payoutStaleAfterHours,
 }: AdminServiceDeps) {
   const userSelect = {
     id: true,
@@ -507,6 +510,7 @@ export function createAdminService({
         generations,
         payoutGroups,
         payableGroups,
+        stalePayouts,
       ] = await Promise.all([
         // One row per distinct subscriber with an ACTIVE subscription.
         prisma.subscription.groupBy({
@@ -541,6 +545,14 @@ export function createAdminService({
           by: ['modelId'],
           where: PAYABLE_WHERE,
           _sum: { modelShareCents: true },
+        }),
+        // Session 12: unsettled payouts past the staleness cutoff — the ones
+        // the reconciliation sweep flags. One count, whatever the table size.
+        prisma.payout.count({
+          where: {
+            status: { in: ['PENDING', 'PROCESSING'] },
+            createdAt: { lt: new Date(now.getTime() - payoutStaleAfterHours * 60 * 60 * 1000) },
+          },
         }),
       ]);
 
@@ -640,6 +652,7 @@ export function createAdminService({
           // the next run will skip with `payout.skipped_no_payout_email`.
           modelsAboveThresholdWithoutPayoutEmail: aboveThreshold.length - withPayoutEmail,
           thresholdCents: payoutMinThresholdCents,
+          stalePayouts,
         },
       };
     },

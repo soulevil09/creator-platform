@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@creator-platform/shared": "workspace:*",
-    "next": "^14.2.5",
+    "next": "^14.2.35",
     "next-intl": "^4.14.5",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

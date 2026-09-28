@@ -420,6 +420,20 @@ export type StorageCleanupRunSummary = {
   failed: number;
 };
 
+// ─── Reconciliation (Session 12) ─────────────────────────────────────────────
+/**
+ * POST /api/admin/reconciliation/run — counts only, like every other cron run
+ * summary. Never a job id, a subscriber id, or an amount per row.
+ */
+export type ReconciliationRunSummary = {
+  /** Stale PENDING generations moved to FAILED with their credits refunded. */
+  generationsReconciled: number;
+  /** Stale jobs another run (or the live request) settled first — nothing done. */
+  generationsSkipped: number;
+  /** Stale PENDING/PROCESSING payouts flagged today (status never changed). */
+  stalePayoutsFlagged: number;
+};
+
 // ─── Messaging (Session 07) ──────────────────────────────────────────────────
 /**
  * Media kinds a chat message may carry. Mirrors the Prisma
@@ -942,6 +956,12 @@ export type AdminMetricsOverview = {
     byStatus: Array<AdminCurrencyTotal & { status: PayoutRecordStatus; count: number }>;
     /** Models whose unpaid balance clears the threshold but who have set no payout email. */
     modelsAboveThresholdWithoutPayoutEmail: number;
+    /**
+     * PENDING/PROCESSING payouts older than `PAYOUT_STALE_AFTER_HOURS` — the
+     * ones the reconciliation sweep flags for a human (Session 12). Never
+     * auto-resolved: Paxum's status-query API is unverified.
+     */
+    stalePayouts: number;
     thresholdCents: number;
   };
 };

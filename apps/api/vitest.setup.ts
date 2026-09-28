@@ -59,3 +59,9 @@ process.env.AI_PROVIDER_API_KEY ??= 'r8_test_token';
 // are deterministic test values that never leave the suite.
 process.env.WATERMARK_TRACE_SECRET ??= 'test-watermark-trace-secret-at-least-32-chars!!';
 process.env.STORAGE_CLEANUP_CRON_SECRET ??= 'test-storage-cleanup-cron-secret';
+
+// Reconciliation cron secret (Session 12). Same posture as the other cron
+// secrets: a deterministic test value the suite compares against. TRUST_PROXY
+// is deliberately left unset here — its default (false) is what most suites
+// expect, and the D1 tests pass their setting through `buildServer`.
+process.env.RECONCILIATION_CRON_SECRET ??= 'test-reconciliation-cron-secret';

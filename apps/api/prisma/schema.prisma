@@ -187,6 +187,11 @@ model ReferenceImage {
   sizeBytes  Int
 
   createdAt DateTime @default(now())
+
+  // Session 12 index review: every generation request, the model's profile
+  // read and the admin approval queue load a profile's images by this FK —
+  // Postgres does not index foreign keys on its own.
+  @@index([modelProfileId])
 }
 
 // ─── Content (Session 04) ────────────────────────────────────────────────────
@@ -232,6 +237,12 @@ model Content {
   accesses ContentAccess[]
   // Session 11 — moderation reports filed against this item.
   reports  Report[]
+  // Session 12 — raw SQL in migration 20260927120000_security_index_review
+  // (Prisma has no partial-index primitive):
+  //   "Content_cleanup_pending_idx" ON ("id")
+  //     WHERE "deletedAt" IS NOT NULL AND "storageKey" IS NOT NULL
+  // Serves the storage-cleanup sweep's keyset walk over soft-deleted rows
+  // that still hold an object.
 
   @@index([modelId])
   @@index([tier])
@@ -253,10 +264,12 @@ model ContentAccess {
   grantReason String // 'subscription_standard' | 'subscription_premium' | 'model_owner' | 'admin'
   grantedAt   DateTime  @default(now())
   expiresAt   DateTime? // null = permanent (owner/admin); set for subscription-based
+  // Session 12 index review: the former @@index([contentId]) was dropped — it
+  // duplicated the leading column of the (contentId, userId) unique index,
+  // which serves every contentId-only lookup on its own.
 
   @@unique([contentId, userId])
   @@index([userId])
-  @@index([contentId])
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -482,6 +495,13 @@ model AuditLog {
   entityId  String
   metadata  Json?
   createdAt DateTime @default(now())
+  // Session 12 — raw SQL in migration 20260927120000_security_index_review
+  // (Prisma has no expression/partial-index primitive):
+  //   "AuditLog_traceCode_idx" ON (("metadata"->>'traceCode'))
+  //     WHERE "action" IN ('content.served', 'generation.image_served')
+  // Serves the forensic trace lookup (Session 09). Query it with raw SQL using
+  // exactly that expression and predicate — Prisma's JSON `path` filter
+  // compiles to `#>>`, which this index does not match.
 
   @@index([entity, entityId])
   @@index([actorId])
@@ -637,6 +657,12 @@ model GenerationJob {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  // Session 12 — raw SQL in migration 20260927120000_security_index_review:
+  //   "GenerationJob_cleanup_expiresAt_idx" ON ("expiresAt")
+  //     WHERE "status" = 'COMPLETED' AND "storageKey" IS NOT NULL
+  // Serves the storage-cleanup sweep's expired-image scan. (The reconciliation
+  // sweep's PENDING scan is already served by the partial unique index
+  // GenerationJob_one_pending_per_subscriber, which holds only PENDING rows.)
 
   // Gallery listing, newest first, scoped to the caller.
   @@index([subscriberId, createdAt])
