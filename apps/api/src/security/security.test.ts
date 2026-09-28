@@ -149,6 +149,26 @@ describe('D1 — client IP behind a proxy', () => {
     expect((await login(app, OTHER)).statusCode).toBe(400);
   });
 
+  it('TRUST_PROXY=1: a multi-hop X-Forwarded-For resolves to the right-most untrusted hop, not the client-supplied left-most', async () => {
+    const app = await withIpEcho(1);
+
+    // Socket = the one trusted proxy (inject's 127.0.0.1). Everything left of the
+    // hop it appended was written by the client and must not choose the key.
+    const echo = await app.inject({
+      method: 'GET',
+      url: '/__test/ip',
+      headers: { 'x-forwarded-for': `1.1.1.1, ${SPOOFED}` },
+    });
+    expect(echo.json()).toEqual({ ip: SPOOFED });
+
+    for (let i = 0; i < 10; i++) {
+      expect((await login(app, `1.1.1.1, ${SPOOFED}`)).statusCode).toBe(400);
+    }
+    // A fresh forged left-most value does not buy a fresh budget.
+    expect((await login(app, `9.9.9.9, ${SPOOFED}`)).statusCode).toBe(429);
+    expect((await login(app, SPOOFED)).statusCode).toBe(429);
+  });
+
   it('TRUST_PROXY unset: the header is ignored, so a spoofed value cannot reset the login budget', async () => {
     const app = await withIpEcho(undefined);
 
