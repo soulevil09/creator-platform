@@ -1,0 +1,21 @@
+# Build context is the repo root (Session 13, D6). Only source and manifests
+# go in; never secrets, local builds, VCS data or test output.
+**/node_modules
+**/.env
+**/.env.*
+!**/.env.example
+.git
+.github
+.claude
+.turbo
+**/.turbo
+**/.next
+**/.next-test
+**/dist
+**/coverage
+**/*.log
+**/*.tsbuildinfo
+apps/api/prisma/generated
+docs
+infra/local/*.env
+.DS_Store

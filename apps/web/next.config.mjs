@@ -1,3 +1,5 @@
+import { fileURLToPath } from 'node:url';
+import { withSentryConfig } from '@sentry/nextjs/config';
 import createNextIntlPlugin from 'next-intl/plugin';
 
 /**
@@ -44,6 +46,15 @@ const securityHeaders = [
  */
 const nextConfig = {
   reactStrictMode: true,
+  // Session 13 (D6): a self-contained server for the Docker image. Traced from
+  // the monorepo root so the workspace `shared` package is included.
+  output: 'standalone',
+  outputFileTracingRoot: fileURLToPath(new URL('../../', import.meta.url)),
+  // Never serve browser source maps (Session 13, D3). Sentry gets them only
+  // through an authenticated upload in CI, and they are deleted afterwards.
+  productionBrowserSourceMaps: false,
+  // No `X-Powered-By: Next.js` (Session 13): nothing gained by announcing it.
+  poweredByHeader: false,
   images: { unoptimized: true },
   transpilePackages: ['@creator-platform/shared'],
   ...(process.env.NEXT_DIST_DIR ? { distDir: process.env.NEXT_DIST_DIR } : {}),
@@ -52,4 +63,24 @@ const nextConfig = {
   },
 };
 
-export default withNextIntl(nextConfig);
+/**
+ * Sentry (Session 13, D3). The SDK itself is initialised in
+ * `src/instrumentation*.ts` and is inert without NEXT_PUBLIC_SENTRY_DSN.
+ * This wrapper only handles build-time concerns:
+ *   * source maps are generated and uploaded ONLY when SENTRY_AUTH_TOKEN is
+ *     present (CI), then deleted from the build output — never served;
+ *   * no `tunnelRoute`: the stock tunnel is a rewrite that forwards to any
+ *     Sentry project named in the request's query (an open relay). Our own
+ *     `/monitoring` route handler forwards to our DSN only.
+ */
+const sentryAuthToken = process.env.SENTRY_AUTH_TOKEN;
+
+export default withSentryConfig(withNextIntl(nextConfig), {
+  org: process.env.SENTRY_ORG,
+  project: process.env.SENTRY_PROJECT_WEB,
+  authToken: sentryAuthToken,
+  silent: true,
+  telemetry: false,
+  release: { name: process.env.NEXT_PUBLIC_SENTRY_RELEASE, create: Boolean(sentryAuthToken) },
+  sourcemaps: { disable: !sentryAuthToken, deleteSourcemapsAfterUpload: true },
+});

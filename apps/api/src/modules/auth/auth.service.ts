@@ -9,10 +9,10 @@ import { createHash, randomBytes } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import { DEFAULT_LOCALE, isLocale, type Locale, type Role } from '@creator-platform/shared';
 import type { PrismaClient } from '../../lib/prisma.js';
-import type { Emailer } from '../../lib/email.js';
+import { isEnabled as isEmailEnabledFromEnv, type Emailer } from '../../lib/email.js';
 import type { RegisterInput } from './auth.schema.js';
+import { PASSWORD_COST, hashPassword } from './password.js';
 
-const PASSWORD_COST = 12;
 const REFRESH_COST = 10;
 const VERIFY_TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
@@ -62,6 +62,13 @@ export class AuthError extends Error {
 export interface AuthServiceDeps {
   prisma: PrismaClient;
   emailer: Emailer;
+  /**
+   * Whether email can be sent (Session 13, D1). Registration *depends* on the
+   * verification email arriving — an account nobody can verify is a dead row —
+   * so with email disabled it fails closed before touching the database.
+   * Defaults to `EMAIL_PROVIDER`.
+   */
+  isEmailEnabled?: () => boolean;
 }
 
 export interface MeResult {
@@ -82,7 +89,11 @@ function toApiLocale(value: string): Locale {
   return isLocale(value) ? value : DEFAULT_LOCALE;
 }
 
-export function createAuthService({ prisma, emailer }: AuthServiceDeps) {
+export function createAuthService({
+  prisma,
+  emailer,
+  isEmailEnabled = isEmailEnabledFromEnv,
+}: AuthServiceDeps) {
   return {
     /**
      * Create an unverified account and send the verification email.
@@ -93,13 +104,19 @@ export function createAuthService({ prisma, emailer }: AuthServiceDeps) {
      * user's language from the start.
      */
     async register(input: RegisterInput, locale: Locale): Promise<{ userId: string; role: Role }> {
+      // Before the duplicate lookup too: with email off, "is this address
+      // taken?" must not be answerable through this endpoint either.
+      if (!isEmailEnabled()) {
+        throw new AuthError(503, 'registration_unavailable');
+      }
+
       const existing = await prisma.user.findUnique({ where: { email: input.email } });
       if (existing) {
         // Duplicate: do not create and do not send an email.
         throw new AuthError(409, 'Email already registered');
       }
 
-      const passwordHash = await bcrypt.hash(input.password, PASSWORD_COST);
+      const passwordHash = await hashPassword(input.password);
       const verifyToken = randomBytes(32).toString('hex');
       const verifyTokenExpiresAt = new Date(Date.now() + VERIFY_TOKEN_TTL_MS);
 

@@ -157,9 +157,13 @@ findings are marked **[S12]** with what was done about them.
 
 - Boot-time env validation; unknown provider names crash at boot —
   `api/lib/env.ts`, `api/modules/*/provider.factory.ts`.
-- **[S12]** `TRUST_PROXY` → Fastify `trustProxy`: default `false`, hop count or
-  CIDR list, `true` **rejected at boot** so `X-Forwarded-For` cannot be spoofed
-  to reset IP-scoped budgets — `api/lib/env.ts` (`parseTrustProxy`), `api/index.ts`.
+- **[S12, tightened S13]** `TRUST_PROXY` → Fastify `trustProxy`: default
+  `false`, otherwise the proxy IPs/CIDRs; `true` **and a hop count are both
+  rejected at boot** (fastify ≥ 5.12.5 makes a numeric `trustProxy` trust no
+  hop, which behind Caddy would merge every client into one budget). Production
+  uses the pinned compose subnet `172.30.0.0/24`, and Caddy overwrites any
+  client-sent `X-Forwarded-For` — `api/lib/env.ts` (`parseTrustProxy`),
+  `api/index.ts`, `infra/compose.yaml`, `infra/Caddyfile`.
 - **[S12]** 1 MB global JSON `bodyLimit` (multipart keeps its per-route
   `fileSize` limits) — `api/index.ts`.
 - **[S12]** API security headers via `@fastify/helmet` (CSP

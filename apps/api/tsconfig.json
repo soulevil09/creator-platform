@@ -3,8 +3,7 @@
   "compilerOptions": {
     "module": "ESNext",
     "moduleResolution": "Bundler",
-    "outDir": "dist",
-    "rootDir": "src",
+    "noEmit": true,
     "types": ["node"],
     "baseUrl": ".",
     "paths": {
@@ -12,6 +11,7 @@
       "@api/*": ["./src/*"]
     }
   },
-  "include": ["src/**/*.ts"],
+  // Emit is esbuild's job (build.mjs); tsc only typechecks (Session 13).
+  "include": ["src/**/*.ts", "scripts/ops/**/*.ts", "scripts/check-watermark.ts"],
   "exclude": ["node_modules", "dist", "prisma/generated"]
 }

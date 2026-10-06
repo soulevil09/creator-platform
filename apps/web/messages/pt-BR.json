@@ -24,6 +24,7 @@
     "refreshBalance": "Atualizar saldo",
     "buyHeading": "Comprar créditos",
     "paymentMethod": "Forma de pagamento",
+    "noChannels": "Nenhuma forma de pagamento está disponível no momento.",
     "channel": {
       "pix": "PIX (BRL)",
       "crypto": "Cripto (USD)"

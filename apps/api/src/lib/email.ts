@@ -1,7 +1,18 @@
-// Transactional email via Resend (free tier; swappable behind this interface).
+// Transactional email behind the `Emailer` interface.
 //
-// The rest of the app depends only on the `Emailer` interface, so tests inject a
-// fake and Session 13+ can swap providers without touching auth code.
+// The rest of the app depends only on `Emailer`, so tests inject a fake and a
+// provider swap never touches auth code. `EMAIL_PROVIDER` (Session 13, D1)
+// picks the implementation:
+//
+//   resend   — Resend. NON-PRODUCTION ONLY: Resend's AUP bars adult
+//              businesses, so a production boot refuses it (provider-mode.ts).
+//   mock     — development: sends nothing, logs what it would have sent
+//              (never the recipient address). Refused in production.
+//   disabled — the default. Every send throws `EmailDisabledError`. Call sites
+//              that depend on delivery check `isEnabled()` first and fail
+//              closed; notification-only call sites skip the send. The throw
+//              exists so a forgotten call site fails loudly in tests rather
+//              than silently dropping mail.
 //
 // ── Localization (Session 10) ───────────────────────────────────────────────
 // Both templates exist in every supported locale as a plain
@@ -20,6 +31,7 @@ import {
   type SubscriptionTier,
 } from '@creator-platform/shared';
 import { env } from './env.js';
+import { DISABLED, resolveProviderMode } from './provider-mode.js';
 
 /**
  * What a renewal reminder needs to say. The charge has already been issued by
@@ -228,4 +240,69 @@ export function createResendEmailer(apiKey: string = env.EMAIL_API_KEY): Emailer
       await resend.emails.send({ from: env.EMAIL_FROM, to, subject, html });
     },
   };
+}
+
+// ─── Provider selection (Session 13, D1) ────────────────────────────────────
+
+/** A send reached the emailer while `EMAIL_PROVIDER=disabled`. */
+export class EmailDisabledError extends Error {
+  constructor() {
+    super('Email is disabled (EMAIL_PROVIDER=disabled)');
+    this.name = 'EmailDisabledError';
+  }
+}
+
+/** Whether any email can be sent. Read live, like the payment factories. */
+export function isEnabled(): boolean {
+  return resolveProviderMode('email', process.env) !== DISABLED;
+}
+
+/** Throws on every send — see the module header for why it is not a no-op. */
+export function createDisabledEmailer(): Emailer {
+  return {
+    async sendVerificationEmail() {
+      throw new EmailDisabledError();
+    },
+    async sendRenewalReminderEmail() {
+      throw new EmailDisabledError();
+    },
+  };
+}
+
+/** The minimal logger surface the mock needs (Fastify's logger satisfies it). */
+export interface EmailLogger {
+  info(obj: object, msg: string): void;
+}
+
+/**
+ * Development emailer: renders the template (so a template bug still shows)
+ * and logs the subject — plus, for verification, the link a developer needs to
+ * finish signing up. Never the recipient address. Refused in production.
+ */
+export function createMockEmailer(logger?: EmailLogger): Emailer {
+  return {
+    async sendVerificationEmail(_to, verifyToken, locale) {
+      const { subject } = renderVerificationEmail(verifyToken, locale);
+      logger?.info(
+        { email: 'verification', subject, url: verificationUrl(verifyToken) },
+        '[email:mock] verification email not sent',
+      );
+    },
+    async sendRenewalReminderEmail(_to, params, locale) {
+      const { subject } = renderRenewalReminderEmail(params, locale);
+      logger?.info({ email: 'renewal_reminder', subject }, '[email:mock] reminder not sent');
+    },
+  };
+}
+
+/** The emailer `EMAIL_PROVIDER` selects. Throws on an invalid value (boot). */
+export function createEmailer(logger?: EmailLogger): Emailer {
+  switch (resolveProviderMode('email', process.env)) {
+    case 'resend':
+      return createResendEmailer();
+    case 'mock':
+      return createMockEmailer(logger);
+    default:
+      return createDisabledEmailer();
+  }
 }

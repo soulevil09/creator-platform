@@ -18,6 +18,12 @@ import {
 
 export interface ContentRoutesOptions extends FastifyPluginOptions {
   service: ContentService;
+  /**
+   * Deployment-wide upload ceiling (`CONTENT_UPLOAD_MAX_BYTES`, Session 13).
+   * Uploads are buffered whole in memory, so on a small container this — not
+   * the per-type product caps below — is the binding limit. Unset = the caps.
+   */
+  maxUploadBytes?: number;
 }
 
 /** Accepted upload MIME types → { ext, category }. */
@@ -101,6 +107,8 @@ export default async function contentRoutes(
   opts: ContentRoutesOptions,
 ): Promise<void> {
   const { service } = opts;
+  const maxVideoBytes = Math.min(MAX_VIDEO_BYTES, opts.maxUploadBytes ?? MAX_VIDEO_BYTES);
+  const maxImageBytes = Math.min(MAX_IMAGE_BYTES, maxVideoBytes);
 
   // ── POST /upload ──────────────────────────────────────────────────────────
   app.post(
@@ -116,11 +124,11 @@ export default async function contentRoutes(
       let declaredMime = '';
       let truncated = false;
 
-      // Override the global 10 MB multipart cap with the video ceiling; the
+      // Override the global 10 MB multipart cap with the upload ceiling; the
       // image-specific cap is enforced after we know the detected type. Beyond
       // the ceiling the stream truncates (throwFileSizeLimit is off) → 413.
       try {
-        const parts = request.parts({ limits: { fileSize: MAX_VIDEO_BYTES, files: 1 } });
+        const parts = request.parts({ limits: { fileSize: maxVideoBytes, files: 1 } });
         for await (const part of parts) {
           if (part.type === 'file') {
             if (part.fieldname !== 'file') {
@@ -165,13 +173,13 @@ export default async function contentRoutes(
           .send({ error: `Declared type ${parsed.data.type} does not match file contents` });
       }
 
-      // Size caps. A truncated stream means the 500 MB ceiling was hit (video);
-      // images additionally cap at 50 MB.
+      // Size caps. A truncated stream means the upload ceiling was hit; images
+      // additionally cap at 50 MB (or the ceiling, if lower).
       if (truncated) {
         return reply.code(413).send({ error: 'File exceeds the maximum allowed size' });
       }
-      if (allowed.category === 'IMAGE' && fileBuffer.length > MAX_IMAGE_BYTES) {
-        return reply.code(413).send({ error: 'Image exceeds the 50 MB limit' });
+      if (allowed.category === 'IMAGE' && fileBuffer.length > maxImageBytes) {
+        return reply.code(413).send({ error: 'Image exceeds the maximum allowed size' });
       }
 
       try {

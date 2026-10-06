@@ -378,9 +378,14 @@ describe('POST /api/admin/reconciliation/run — pass 2, stale payouts', () => {
   });
 
   it('flags again on the next UTC day', async () => {
+    const today = new Date('2026-09-27T08:00:00Z');
+    const laterToday = new Date('2026-09-27T23:59:00Z');
+    const tomorrow = new Date('2026-09-28T00:01:00Z');
+    // Aged relative to the fixed run dates, not the wall clock (Session 13:
+    // `Date.now()` here made the test start failing ~8 days after it was written).
     const payout = seedPayout(h, {
       modelId: 'm_1',
-      createdAt: new Date(Date.now() - 200 * HOUR_MS),
+      createdAt: new Date(today.getTime() - 200 * HOUR_MS),
     });
     const service = createReconciliationService({
       prisma: h.prisma as unknown as PrismaClient,
@@ -388,9 +393,6 @@ describe('POST /api/admin/reconciliation/run — pass 2, stale payouts', () => {
       generationStaleAfterMs: env.GENERATION_STALE_AFTER_MS,
       payoutStaleAfterHours: 72,
     });
-    const today = new Date('2026-09-27T08:00:00Z');
-    const laterToday = new Date('2026-09-27T23:59:00Z');
-    const tomorrow = new Date('2026-09-28T00:01:00Z');
 
     expect((await service.run(today)).stalePayoutsFlagged).toBe(1);
     expect((await service.run(laterToday)).stalePayoutsFlagged).toBe(0);

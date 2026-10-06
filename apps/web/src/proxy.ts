@@ -37,8 +37,10 @@ export const config = {
   matcher: [
     {
       // Documents only: static assets and the image optimiser need no nonce,
-      // and prefetches are not rendered as documents.
-      source: '/((?!_next/static|_next/image|favicon.ico).*)',
+      // and prefetches are not rendered as documents. `/monitoring` (Session
+      // 13) is the Sentry tunnel — a JSON-less POST endpoint, not a document,
+      // so it needs no CSP and is never touched here.
+      source: '/((?!_next/static|_next/image|favicon.ico|monitoring).*)',
       missing: [
         { type: 'header', key: 'next-router-prefetch' },
         { type: 'header', key: 'purpose', value: 'prefetch' },

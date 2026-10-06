@@ -433,6 +433,8 @@ describe('subscription lifecycle', () => {
       const second = await runSweep(app);
       expect(second.json()).toEqual({
         remindersIssued: 0,
+        remindersSkipped: 0,
+        skippedChannelDisabled: 0,
         movedToPastDue: 0,
         movedToExpired: 0,
         movedToCanceled: 0,

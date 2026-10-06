@@ -1,0 +1,53 @@
+# =============================================================================
+# Local stack overlay (Session 13, D7/D9) — the production compose file plus:
+#   * locally built images (creator-platform-{api,web}:local, arm64 on colima)
+#   * a Postgres container instead of Supabase (pinned by digest)
+#   * generated throwaway secrets/certs from ./up.sh (gitignored)
+# Relative paths resolve against infra/ (the first compose file's directory).
+#   * hosts api.visorfans.test / app.visorfans.test; Caddy's internal CA for
+#     the api host (stands in for Let's Encrypt), a self-signed "origin"
+#     certificate for the app host (stands in for Cloudflare Origin CA)
+#
+#   infra/local/up.sh        # generate, build-free start, migrate, smoke
+# =============================================================================
+services:
+  postgres:
+    image: postgres:16.15-bookworm@sha256:efedf3595f1d6f415c08568ba171029bf54052e754cc9f030e3f2412b21f3d67
+    restart: unless-stopped
+    env_file:
+      - ./local/.generated/postgres.env
+    networks:
+      - internal
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d visorfans']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  api:
+    image: creator-platform-api:local
+    env_file: !override
+      - ./local/.generated/api.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  migrate:
+    image: creator-platform-api:local
+    env_file: !override
+      - ./local/.generated/api.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  web:
+    image: creator-platform-web:local
+
+  caddy:
+    volumes: !override
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./local/.generated/certs:/certs:ro
+      - caddy_data:/data
+      - caddy_config:/config

@@ -83,6 +83,7 @@ process.env.PAYMENT_PROVIDER_PIX = 'mock';
 process.env.PAYMENT_PROVIDER_CRYPTO = 'mock';
 process.env.PAYMENT_PROVIDER_CARD = 'mock';
 process.env.PAYOUT_PROVIDER = 'mock';
+process.env.EMAIL_PROVIDER = 'mock';
 // The dry run never touches the database; a placeholder keeps the Prisma
 // client constructible when no DATABASE_URL is configured at all.
 process.env.DATABASE_URL ??= 'postgresql://load:dry-run@127.0.0.1:1/none';

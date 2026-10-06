@@ -9,29 +9,37 @@
 // debited.
 // =============================================================================
 import { env } from '../../lib/env.js';
+import {
+  DISABLED,
+  PROVIDER_CHANNELS,
+  ProviderModeError,
+  resolveProviderMode,
+} from '../../lib/provider-mode.js';
 import { AIProviderConfigError, type IAIProvider } from './provider.interface.js';
 import { ReplicateAdapter } from './adapters/replicate.adapter.js';
 import { MockAIProvider } from './adapters/mock.adapter.js';
 
 const ENV_VAR = 'AI_PROVIDER';
 
-/**
- * Adapter names accepted. `mock` is an offline development setting — it makes
- * generation work before the Replicate account is live, with no token and no
- * network.
- */
-const SUPPORTED = ['replicate', 'mock'] as const;
-
-/** Adapter used when `AI_PROVIDER` is unset. */
-const DEFAULT_NAME = 'replicate';
-
 let cached: IAIProvider | null = null;
 
 // Read straight from `process.env` (rather than the frozen `env` snapshot) so
 // that flipping the variable and clearing the cache is genuinely all it takes
-// to swap an adapter — the property the factory test asserts.
+// to swap an adapter — the property the factory test asserts. Accepted values,
+// the `disabled` default and the production `mock` ban live in
+// lib/provider-mode.ts (Session 13, D1).
 function configuredName(): string {
-  return (process.env[ENV_VAR] ?? DEFAULT_NAME).trim().toLowerCase();
+  try {
+    return resolveProviderMode('ai', process.env);
+  } catch (err) {
+    if (err instanceof ProviderModeError) throw new AIProviderConfigError(err.message);
+    throw err;
+  }
+}
+
+/** Whether AI generation has an adapter at all. Business code asks this, never env. */
+export function isEnabled(): boolean {
+  return configuredName() !== DISABLED;
 }
 
 function instantiate(name: string): IAIProvider {
@@ -46,29 +54,31 @@ function instantiate(name: string): IAIProvider {
     default:
       throw new AIProviderConfigError(
         `[generation] ${ENV_VAR}="${name}" is not a known adapter. ` +
-          `Supported: ${SUPPORTED.join(', ')}.`,
+          `Supported: ${PROVIDER_CHANNELS.ai.allowed.join(', ')}.`,
       );
   }
 }
 
-/** Resolve the configured AI adapter, memoised for the process. */
+/**
+ * Resolve the configured adapter, memoised for the process. Throws
+ * `AIProviderConfigError` on an invalid value and when AI generation is disabled —
+ * callers check `isEnabled` first, so reaching this while disabled is a bug.
+ */
 export function getAIProvider(): IAIProvider {
   if (cached) return cached;
 
   const name = configuredName();
-  if (!(SUPPORTED as readonly string[]).includes(name)) {
-    throw new AIProviderConfigError(
-      `[generation] ${ENV_VAR}="${name}" is not supported. Supported: ${SUPPORTED.join(', ')}.`,
-    );
+  if (name === DISABLED) {
+    throw new AIProviderConfigError(`[generation] disabled (${ENV_VAR}).`);
   }
 
   cached = instantiate(name);
   return cached;
 }
 
-/** Boot-time check: the AI provider must resolve, or the process must not start. */
+/** Boot-time check: the value must be valid and an enabled adapter must construct. */
 export function assertAIProviderConfigured(): void {
-  getAIProvider();
+  if (isEnabled()) getAIProvider();
 }
 
 /** Drop the memoised adapter so a test can re-read a changed env value. */

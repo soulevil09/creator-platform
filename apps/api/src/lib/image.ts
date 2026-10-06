@@ -58,37 +58,89 @@ function encodeAs(pipeline: SharpPipeline, mimeType: string): SharpPipeline {
   }
 }
 
+/**
+ * Memory bounds for the production box (Session 13): one vCPU, 1 GB RAM (2 GB
+ * at launch), the API container capped at 448 MiB.
+ *
+ *   * libvips threads per image = 1. More threads cannot run in parallel on one
+ *     vCPU anyway, and each one holds its own tile buffers.
+ *   * sharp's operation cache off: it keeps decoded images around to speed up
+ *     repeat work, which per-viewer watermarking never repeats.
+ *   * at most 2 watermarks in flight; the rest queue. A 2048-px RGBA working
+ *     image is ~16 MiB, so two in flight plus encode buffers stay well under
+ *     ~100 MiB of native memory, leaving the heap its 256 MiB.
+ *   * decompression-bomb guard: inputs above 50 megapixels are refused
+ *     (sharp's default is 268 MP, i.e. a 1 GiB decode).
+ */
+const SHARP_THREADS = 1;
+const MAX_CONCURRENT_WATERMARKS = 2;
+const MAX_INPUT_PIXELS = 50_000_000;
+
+/** A minimal FIFO semaphore: at most `limit` tasks run at once. */
+function createLimiter(limit: number) {
+  let active = 0;
+  const waiting: Array<() => void> = [];
+  return async function run<T>(task: () => Promise<T>): Promise<T> {
+    if (active >= limit) await new Promise<void>((resolve) => waiting.push(resolve));
+    active += 1;
+    try {
+      return await task();
+    } finally {
+      active -= 1;
+      waiting.shift()?.();
+    }
+  };
+}
+
 export function createSharpImageProcessor(): ImageProcessor {
+  sharp.concurrency(SHARP_THREADS);
+  sharp.cache(false);
+  const limit = createLimiter(MAX_CONCURRENT_WATERMARKS);
+
   return {
     async getDimensions(buffer) {
       const { width, height } = await sharp(buffer).metadata();
       return { width: width ?? null, height: height ?? null };
     },
 
-    async watermark(buffer, text, mimeType) {
-      // Resize down (never up) so the SVG overlay and re-encode stay under the
-      // ~500ms budget from the session perf notes for very large images.
-      const base = sharp(buffer).resize({
-        width: MAX_WATERMARK_EDGE,
-        height: MAX_WATERMARK_EDGE,
-        fit: 'inside',
-        withoutEnlargement: true,
-      });
+    watermark(buffer, text, mimeType) {
+      return limit(() => renderWatermark(buffer, text, mimeType));
+    },
+  };
+}
 
-      const meta = await base.metadata();
-      const width = meta.width ?? MAX_WATERMARK_EDGE;
-      const height = meta.height ?? MAX_WATERMARK_EDGE;
+async function renderWatermark(buffer: Buffer, text: string, mimeType: string): Promise<Buffer> {
+  // Resize down (never up) so the SVG overlay and re-encode stay under the
+  // ~500ms budget from the session perf notes for very large images.
+  //
+  // The resize is materialised (raw pixels) before the overlay is sized:
+  // `metadata()` on a pipeline reports the INPUT dimensions, not the resized
+  // ones, so an overlay built from it is larger than the output for any image
+  // over MAX_WATERMARK_EDGE and the composite throws (Session 13 fix — before
+  // it, serving any photo larger than 2048 px failed with a 500).
+  const { data, info } = await sharp(buffer, { limitInputPixels: MAX_INPUT_PIXELS })
+    .rotate() // honour EXIF orientation before measuring
+    .resize({
+      width: MAX_WATERMARK_EDGE,
+      height: MAX_WATERMARK_EDGE,
+      fit: 'inside',
+      withoutEnlargement: true,
+    })
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const { width, height, channels } = info;
+  const base = sharp(data, { raw: { width, height, channels } });
 
-      // Scale text to the image; clamp so tiny thumbnails stay legible and huge
-      // images don't get a giant stamp. Padding keeps it off the very edge.
-      const fontSize = Math.max(14, Math.round(width * 0.03));
-      const padding = Math.round(fontSize * 0.75);
-      const label = escapeXml(text);
+  // Scale text to the image; clamp so tiny thumbnails stay legible and huge
+  // images don't get a giant stamp. Padding keeps it off the very edge.
+  const fontSize = Math.max(14, Math.round(width * 0.03));
+  const padding = Math.round(fontSize * 0.75);
+  const label = escapeXml(text);
 
-      // White text at 40% opacity with a dark blurred drop shadow for contrast
-      // over light backgrounds. Anchored bottom-right via text-anchor:end.
-      const svg = Buffer.from(
-        `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
+  // White text at 40% opacity with a dark blurred drop shadow for contrast
+  // over light backgrounds. Anchored bottom-right via text-anchor:end.
+  const svg = Buffer.from(
+    `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
   <defs>
     <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
       <feDropShadow dx="0" dy="1" stdDeviation="1" flood-color="#000000" flood-opacity="0.8"/>
@@ -98,11 +150,9 @@ export function createSharpImageProcessor(): ImageProcessor {
         font-family="sans-serif" font-size="${fontSize}" font-weight="600"
         text-anchor="end" fill="#ffffff" fill-opacity="0.4" filter="url(#shadow)">${label}</text>
 </svg>`,
-        'utf8',
-      );
+    'utf8',
+  );
 
-      const composited = base.composite([{ input: svg, top: 0, left: 0 }]);
-      return encodeAs(composited, mimeType).toBuffer();
-    },
-  };
+  const composited = base.composite([{ input: svg, top: 0, left: 0 }]);
+  return encodeAs(composited, mimeType).toBuffer();
 }

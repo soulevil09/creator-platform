@@ -16,6 +16,11 @@
 // associated label or `aria-label`; async state is announced through a polite
 // live region; the QR image carries descriptive alt text.
 //
+// Payment methods (Session 13): only the channels the API reports as enabled
+// (`GET /api/payments/channels`) are offered. A switched-off channel would
+// answer checkout with 503 anyway; hiding it keeps that error off the screen.
+// If the list cannot be loaded, no method is offered (fail closed).
+//
 // Every user-facing string comes from the active locale's catalog (Session 10)
 // via `useTranslations`; catalog labels (`pack.label`) are resolved with
 // `resolveLabel` against `useLocale()`. Error codes the API returns
@@ -81,6 +86,8 @@ export default function WalletPage() {
   const locale = useLocale();
   const [balance, setBalance] = useState<number | null>(null);
   const [channel, setChannel] = useState<CheckoutChannel>('pix');
+  // null while loading; [] when nothing is enabled (or the list failed).
+  const [channels, setChannels] = useState<CheckoutChannel[] | null>(null);
   const [charge, setCharge] = useState<CheckoutResponse | null>(null);
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
@@ -106,6 +113,33 @@ export default function WalletPage() {
   useEffect(() => {
     void loadBalance();
   }, [loadBalance]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      let enabled: CheckoutChannel[] = [];
+      try {
+        const res = await fetch(`${API_URL}/api/payments/channels`, { credentials: 'include' });
+        if (res.ok) {
+          const data = (await res.json()) as { channels?: unknown };
+          const listed = Array.isArray(data.channels) ? data.channels : [];
+          // Only names this build knows how to render; never trust the shape.
+          enabled = CHECKOUT_CHANNELS.filter((option) => listed.includes(option));
+        }
+      } catch {
+        // Fail closed: offer nothing rather than a method that may be off.
+      }
+      if (cancelled) return;
+      setChannels(enabled);
+      if (enabled.length > 0)
+        setChannel((current) => (enabled.includes(current) ? current : enabled[0]));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const available = channels ?? [];
 
   async function buy(packId: string) {
     setBusy(true);
@@ -162,70 +196,82 @@ export default function WalletPage() {
             {t('buyHeading')}
           </h2>
 
-          <fieldset style={{ border: '1px solid #334155', borderRadius: 8, padding: '0.75rem' }}>
-            <legend style={{ padding: '0 0.4rem', color: '#cbd5e1' }}>{t('paymentMethod')}</legend>
-            {CHECKOUT_CHANNELS.map((option) => (
-              <label
-                key={option}
-                htmlFor={`channel-${option}`}
-                style={{ marginRight: '1.25rem', cursor: 'pointer' }}
-              >
-                <input
-                  id={`channel-${option}`}
-                  type="radio"
-                  name="channel"
-                  value={option}
-                  checked={channel === option}
-                  onChange={() => setChannel(option)}
-                  style={{ marginRight: 6 }}
-                />
-                {t(`channel.${option}`)}
-              </label>
-            ))}
-          </fieldset>
+          {channels !== null && available.length === 0 && (
+            <p style={{ color: '#cbd5e1', margin: 0 }}>{t('noChannels')}</p>
+          )}
 
-          <ul style={{ listStyle: 'none', padding: 0, margin: '1rem 0 0' }}>
-            {CREDIT_PACKS.map((pack) => (
-              <li
-                key={pack.id}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: '1rem',
-                  padding: '0.75rem 0',
-                  borderTop: '1px solid #1e293b',
-                }}
+          {available.length > 0 && (
+            <>
+              <fieldset
+                style={{ border: '1px solid #334155', borderRadius: 8, padding: '0.75rem' }}
               >
-                <span>
-                  <strong>{resolveLabel(pack.label, locale)}</strong>
-                  <span style={{ color: '#94a3b8', marginLeft: 8 }}>
-                    {t('packSummary', {
-                      credits: pack.credits,
-                      price: formatPrice(
-                        pack.price[CHANNEL_CURRENCY[channel]],
-                        CHANNEL_CURRENCY[channel],
-                        locale,
-                      ),
-                    })}
-                  </span>
-                </span>
-                <button
-                  type="button"
-                  style={{ ...styles.button, opacity: busy ? 0.6 : 1 }}
-                  disabled={busy}
-                  aria-busy={busy}
-                  aria-label={t('buyAria', {
-                    pack: resolveLabel(pack.label, locale),
-                    credits: pack.credits,
-                  })}
-                  onClick={() => buy(pack.id)}
-                >
-                  {t('buy')}
-                </button>
-              </li>
-            ))}
-          </ul>
+                <legend style={{ padding: '0 0.4rem', color: '#cbd5e1' }}>
+                  {t('paymentMethod')}
+                </legend>
+                {available.map((option) => (
+                  <label
+                    key={option}
+                    htmlFor={`channel-${option}`}
+                    style={{ marginRight: '1.25rem', cursor: 'pointer' }}
+                  >
+                    <input
+                      id={`channel-${option}`}
+                      type="radio"
+                      name="channel"
+                      value={option}
+                      checked={channel === option}
+                      onChange={() => setChannel(option)}
+                      style={{ marginRight: 6 }}
+                    />
+                    {t(`channel.${option}`)}
+                  </label>
+                ))}
+              </fieldset>
+
+              <ul style={{ listStyle: 'none', padding: 0, margin: '1rem 0 0' }}>
+                {CREDIT_PACKS.map((pack) => (
+                  <li
+                    key={pack.id}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: '1rem',
+                      padding: '0.75rem 0',
+                      borderTop: '1px solid #1e293b',
+                    }}
+                  >
+                    <span>
+                      <strong>{resolveLabel(pack.label, locale)}</strong>
+                      <span style={{ color: '#94a3b8', marginLeft: 8 }}>
+                        {t('packSummary', {
+                          credits: pack.credits,
+                          price: formatPrice(
+                            pack.price[CHANNEL_CURRENCY[channel]],
+                            CHANNEL_CURRENCY[channel],
+                            locale,
+                          ),
+                        })}
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      style={{ ...styles.button, opacity: busy ? 0.6 : 1 }}
+                      disabled={busy}
+                      aria-busy={busy}
+                      aria-label={t('buyAria', {
+                        pack: resolveLabel(pack.label, locale),
+                        credits: pack.credits,
+                      })}
+                      onClick={() => buy(pack.id)}
+                    >
+                      {t('buy')}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
         </section>
 
         {/* Announced to assistive technology without stealing focus. */}

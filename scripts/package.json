@@ -1,0 +1,5 @@
+{
+  "//": "Repo-level scripts (Session 13): ESM, run with node --experimental-strip-types.",
+  "private": true,
+  "type": "module"
+}

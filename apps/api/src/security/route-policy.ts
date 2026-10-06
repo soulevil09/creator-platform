@@ -14,6 +14,8 @@
 /** Routes intentionally reachable without the access-token `authenticate` hook. */
 export const PUBLIC_ROUTES: Readonly<Record<string, string>> = {
   'GET /health': 'liveness probe — static JSON, no user data, no DB access',
+  'GET /health/ready':
+    'readiness probe — answers ok/unavailable only (one bounded SELECT 1); IP rate-limited',
   'POST /api/auth/register': 'account creation — there is no session yet',
   'GET /api/auth/verify-email': 'authenticated by the one-time 256-bit email token',
   'POST /api/auth/login': 'mints the session — authenticated by the password',
@@ -37,4 +39,20 @@ export const PUBLIC_ROUTES: Readonly<Record<string, string>> = {
 export const UNLIMITED_ROUTES: Readonly<Record<string, string>> = {
   'GET /health':
     'polled by load balancers/uptime monitors from a few IPs at high frequency; constant-time, no DB',
+};
+
+/**
+ * Routes that exist only while their provider channel is enabled (Session 13,
+ * D1). A disabled channel's webhook is not registered at all, so it is a 404.
+ *
+ * This set grants ONE exception: the route may be ABSENT. When it is
+ * registered it is checked exactly like every other route — authenticated and
+ * rate-limited, or listed in PUBLIC_ROUTES / UNLIMITED_ROUTES with a reason.
+ * The inventory test builds the server both all-disabled and all-enabled.
+ */
+export const CONDITIONAL_ROUTES: Readonly<Record<string, string>> = {
+  'POST /api/payments/woovi/webhook': 'registered only while PAYMENT_PROVIDER_PIX is enabled',
+  'POST /api/payments/nowpayments/webhook':
+    'registered only while PAYMENT_PROVIDER_CRYPTO is enabled',
+  'POST /api/payouts/paxum/webhook': 'registered only while PAYOUT_PROVIDER is enabled',
 };

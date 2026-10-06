@@ -47,9 +47,11 @@ jobs:
           # --fail-with-body so a non-2xx exits non-zero (the run turns red)
           # while still printing what the API said. The summary body carries
           # only aggregate counts — no model ids, no amounts per model.
+          # No request body and therefore no Content-Type (Session 13): an
+          # empty body declared as application/json is a 400 before the route
+          # runs — the same fix the Session 12 addendum made to the other crons.
           curl --silent --show-error --fail-with-body \
             --max-time 300 \
             -X POST "${API_PUBLIC_URL}/api/payouts/run" \
             -H "X-Payout-Cron-Secret: ${PAYOUT_CRON_SECRET}" \
-            -H 'Content-Type: application/json' \
             | tee "$GITHUB_STEP_SUMMARY"

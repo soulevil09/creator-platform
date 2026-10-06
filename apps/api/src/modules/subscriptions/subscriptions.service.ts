@@ -47,6 +47,7 @@ import {
   DEFAULT_LOCALE,
   channelForCurrency,
   isLocale,
+  type CheckoutChannel,
   type MySubscriptionsResponse,
   type SubscriptionListItem,
   type SubscriptionRenewalRunSummary,
@@ -54,7 +55,8 @@ import {
   type SubscriptionTier,
 } from '@creator-platform/shared';
 import type { PrismaClient } from '../../lib/prisma.js';
-import type { Emailer } from '../../lib/email.js';
+import { isEnabled as isEmailEnabledFromEnv, type Emailer } from '../../lib/email.js';
+import { isEnabled as isPaymentChannelEnabledFromEnv } from '../payments/provider.factory.js';
 import type { PaymentsService } from '../payments/payments.service.js';
 
 /** Typed error carrying the HTTP status the route should answer with. */
@@ -83,7 +85,20 @@ export interface SubscriptionsServiceDeps {
   reminderDays: number;
   /** Days a non-payer stays PAST_DUE after `currentPeriodEnd`. */
   gracePeriodDays: number;
+  /**
+   * Whether a checkout channel has a live adapter (Session 13, D1). A
+   * subscription whose renewal rail is disabled gets no charge at all — it is
+   * counted, and grace → expiry proceeds unchanged. Defaults to the factory.
+   */
+  isChannelEnabled?: (channel: CheckoutChannel) => boolean;
+  /** Whether email can be sent (Session 13, D1). Defaults to `EMAIL_PROVIDER`. */
+  isEmailEnabled?: () => boolean;
+  /** Where a skipped reminder is noted (info, never the recipient address). */
+  logger?: { info(obj: object, msg: string): void };
 }
+
+/** What happened to one due subscription in the reminder pass. */
+type RenewalOutcome = 'issued' | 'issued_reminder_skipped' | 'skipped_channel_disabled' | 'skipped';
 
 /** Shape of the Subscription columns every read here touches. */
 interface SubscriptionRow {
@@ -113,6 +128,9 @@ export function createSubscriptionsService({
   issueSubscriptionCharge,
   reminderDays,
   gracePeriodDays,
+  isChannelEnabled = isPaymentChannelEnabledFromEnv,
+  isEmailEnabled = isEmailEnabledFromEnv,
+  logger,
 }: SubscriptionsServiceDeps) {
   /**
    * Move a set of subscriptions to a new status, audit each one, and report how
@@ -158,12 +176,14 @@ export function createSubscriptionsService({
 
   /**
    * Issue one subscription's renewal charge and email the subscriber about it.
-   * Returns false when the subscription was left alone — an outstanding charge,
-   * a currency no channel bills in, a missing subscriber, or a provider that
-   * refused. None of those are worth failing the whole sweep over: the run is
-   * daily, so anything skipped is retried tomorrow.
+   * Returns `skipped` when the subscription was left alone — an outstanding
+   * charge, a currency no channel bills in, a missing subscriber, or a provider
+   * that refused — and `skipped_channel_disabled` when its rail is switched off.
+   * None of those are worth failing the whole sweep over: the run is daily, so
+   * anything skipped is retried tomorrow. Nothing here writes for a disabled
+   * channel, so a re-run matches the same rows and does the same nothing.
    */
-  async function issueRenewal(row: SubscriptionRow): Promise<boolean> {
+  async function issueRenewal(row: SubscriptionRow): Promise<RenewalOutcome> {
     // Idempotency for this pass: one unpaid renewal charge at a time. A second
     // run the same day finds it and does nothing, so nobody is double-charged.
     const outstanding = await prisma.paymentTransaction.findFirst({
@@ -174,7 +194,7 @@ export function createSubscriptionsService({
         status: 'PENDING',
       },
     });
-    if (outstanding) return false;
+    if (outstanding) return 'skipped';
 
     // Renew on the rail they actually paid on. The stored `provider` names an
     // adapter, not a channel (a `mock` adapter serving PIX reports
@@ -207,11 +227,16 @@ export function createSubscriptionsService({
           },
         },
       });
-      return false;
+      return 'skipped';
     }
 
+    // Session 13, D1: a disabled rail issues nothing — no charge, no audit row
+    // (a daily row per subscription would be noise, and the run summary counts
+    // it). The lifecycle carries on: unpaid, it lapses through grace to expiry.
+    if (!isChannelEnabled(channel)) return 'skipped_channel_disabled';
+
     const subscriber = await prisma.user.findUnique({ where: { id: row.subscriberId } });
-    if (!subscriber) return false;
+    if (!subscriber) return 'skipped';
 
     let issued;
     try {
@@ -237,43 +262,55 @@ export function createSubscriptionsService({
           },
         },
       });
-      return false;
+      return 'skipped';
     }
 
     // The charge is already recorded and payable at this point, so a bounced
     // email must not undo it or abort the sweep. It is logged and moved past:
     // the subscriber can still pay from the app, and tomorrow's run finds the
     // charge outstanding and does not issue a second one.
-    try {
-      await emailer.sendRenewalReminderEmail(
-        subscriber.email,
-        {
-          modelName: issued.modelDisplayName,
-          tier: row.tier as SubscriptionTier,
-          amountCents: issued.checkout.amount,
-          currency: issued.checkout.currency,
-          currentPeriodEnd: row.currentPeriodEnd,
-          payment: issued.checkout.payment,
-        },
-        // Session 10: the reminder goes out in the language the subscriber
-        // chose. The column is Zod-allowlisted on write; the read is narrowed
-        // again here so a hand-edited row can only ever fall to the default.
-        isLocale(subscriber.preferredLocale) ? subscriber.preferredLocale : DEFAULT_LOCALE,
+    //
+    // With email disabled (Session 13, D1) the reminder is notification-only,
+    // so it is skipped rather than failed: logged without the address and
+    // counted in `remindersSkipped`. The charge itself still stands.
+    const emailEnabled = isEmailEnabled();
+    if (!emailEnabled) {
+      logger?.info(
+        { subscriptionId: row.id, transactionId: issued.checkout.transactionId },
+        'renewal reminder skipped: email is disabled',
       );
-    } catch (err) {
-      await prisma.auditLog.create({
-        data: {
-          actorId: null,
-          action: 'subscription.renewal_reminder_email_failed',
-          entity: 'Subscription',
-          entityId: row.id,
-          metadata: {
-            subscriberId: row.subscriberId,
-            transactionId: issued.checkout.transactionId,
-            reason: err instanceof Error ? err.message : 'unknown error',
+    } else {
+      try {
+        await emailer.sendRenewalReminderEmail(
+          subscriber.email,
+          {
+            modelName: issued.modelDisplayName,
+            tier: row.tier as SubscriptionTier,
+            amountCents: issued.checkout.amount,
+            currency: issued.checkout.currency,
+            currentPeriodEnd: row.currentPeriodEnd,
+            payment: issued.checkout.payment,
           },
-        },
-      });
+          // Session 10: the reminder goes out in the language the subscriber
+          // chose. The column is Zod-allowlisted on write; the read is narrowed
+          // again here so a hand-edited row can only ever fall to the default.
+          isLocale(subscriber.preferredLocale) ? subscriber.preferredLocale : DEFAULT_LOCALE,
+        );
+      } catch (err) {
+        await prisma.auditLog.create({
+          data: {
+            actorId: null,
+            action: 'subscription.renewal_reminder_email_failed',
+            entity: 'Subscription',
+            entityId: row.id,
+            metadata: {
+              subscriberId: row.subscriberId,
+              transactionId: issued.checkout.transactionId,
+              reason: err instanceof Error ? err.message : 'unknown error',
+            },
+          },
+        });
+      }
     }
 
     await prisma.auditLog.create({
@@ -295,7 +332,7 @@ export function createSubscriptionsService({
         },
       },
     });
-    return true;
+    return emailEnabled ? 'issued' : 'issued_reminder_skipped';
   }
 
   /** Load the caller's subscription to one model, or 404. */
@@ -417,6 +454,8 @@ export function createSubscriptionsService({
     async runRenewals(now: Date = new Date()): Promise<SubscriptionRenewalRunSummary> {
       const summary: SubscriptionRenewalRunSummary = {
         remindersIssued: 0,
+        remindersSkipped: 0,
+        skippedChannelDisabled: 0,
         movedToPastDue: 0,
         movedToExpired: 0,
         movedToCanceled: 0,
@@ -432,7 +471,12 @@ export function createSubscriptionsService({
       })) as SubscriptionRow[];
 
       for (const row of dueSoon) {
-        if (await issueRenewal(row)) summary.remindersIssued += 1;
+        const outcome = await issueRenewal(row);
+        if (outcome === 'issued' || outcome === 'issued_reminder_skipped') {
+          summary.remindersIssued += 1;
+        }
+        if (outcome === 'issued_reminder_skipped') summary.remindersSkipped += 1;
+        if (outcome === 'skipped_channel_disabled') summary.skippedChannelDisabled += 1;
       }
 
       // ── 2. Grace period start ──────────────────────────────────────────────

@@ -1,5 +1,8 @@
 // HTTP layer for payments: two checkout endpoints (authenticated, subscriber
-// only, rate limited) and two provider webhooks (unauthenticated, but signed).
+// only, rate limited), the enabled-channel list (Session 13), and one provider
+// webhook per ENABLED channel (unauthenticated, but signed). A disabled
+// channel's webhook is never registered, so it is a 404 indistinguishable from
+// any unknown path — there is no handler behind it to probe.
 //
 // Two things this layer owns that the service cannot:
 //
@@ -41,6 +44,14 @@ const CHECKOUT_RATE_LIMIT = {
 
 const subscriberOnly = { preHandler: [authenticate, authorize('subscriber')] };
 
+/** GET /channels — a cheap read, per user (after `authenticate`, Session 11.5). */
+const CHANNELS_RATE_LIMIT = {
+  max: 60,
+  timeWindow: '1 minute',
+  keyGenerator: (request: { user?: { userId?: string }; ip: string }) =>
+    request.user?.userId ?? request.ip,
+};
+
 function sendError(reply: FastifyReply, err: unknown): FastifyReply {
   if (err instanceof PaymentError) {
     return reply.code(err.status).send({ error: err.message });
@@ -76,6 +87,18 @@ export default async function paymentRoutes(
         // whose message quotes the body (Session 12 error surface).
         done(new errorCodes.FST_ERR_CTP_INVALID_JSON_BODY(), undefined);
       }
+    },
+  );
+
+  // ── GET /channels ─────────────────────────────────────────────────────────
+  // Which checkout methods the UI may offer: enabled channel names only —
+  // never a provider name or any configuration (Session 13, D1). Any role:
+  // it describes the platform, not the caller.
+  app.get(
+    '/channels',
+    { preHandler: [authenticate, app.rateLimit(CHANNELS_RATE_LIMIT)] },
+    async (_request, reply) => {
+      return reply.code(200).send({ channels: service.listCheckoutChannels() });
     },
   );
 
@@ -152,6 +175,13 @@ export default async function paymentRoutes(
   // any database access, so rejected traffic is nearly free either way.
   const webhookOpts = { config: { rateLimit: { max: 120, timeWindow: '1 minute' } } };
 
-  app.post('/woovi/webhook', webhookOpts, webhookHandler('pix'));
-  app.post('/nowpayments/webhook', webhookOpts, webhookHandler('crypto'));
+  //
+  // Registered per enabled channel only (Session 13, D1): decided once, at
+  // boot, from the same `isEnabled` the checkout gate uses.
+  if (service.isChannelEnabled('pix')) {
+    app.post('/woovi/webhook', webhookOpts, webhookHandler('pix'));
+  }
+  if (service.isChannelEnabled('crypto')) {
+    app.post('/nowpayments/webhook', webhookOpts, webhookHandler('crypto'));
+  }
 }

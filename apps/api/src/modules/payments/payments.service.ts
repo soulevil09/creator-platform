@@ -41,6 +41,7 @@ import { createId } from '@paralleldrive/cuid2';
 import {
   CANONICAL_LABEL_LOCALE,
   CHANNEL_CURRENCY,
+  CHECKOUT_CHANNELS,
   DEFAULT_REVENUE_SHARE_MODEL_PCT,
   SUBSCRIPTION_PERIOD_DAYS,
   SUBSCRIPTION_PLANS,
@@ -57,6 +58,7 @@ import type { PrismaClient } from '../../lib/prisma.js';
 import type { ContentService } from '../content/content.service.js';
 import type { PrismaTransactionClient, WalletService } from '../wallet/wallet.service.js';
 import { computeRevenueSplit } from '../payouts/revenue.js';
+import { isEnabled as isChannelEnabledFromEnv } from './provider.factory.js';
 import {
   PaymentProviderError,
   type CreateChargeParams,
@@ -101,6 +103,12 @@ export interface PaymentsServiceDeps {
    * stays env-free and a test can vary the split without touching process.env.
    */
   revenueShareModelPct?: number;
+  /**
+   * Whether a channel has a live adapter (Session 13, D1). A disabled channel
+   * answers checkout with 503 `payment_channel_unavailable` before any database
+   * access, and its webhook route is never registered. Defaults to the factory.
+   */
+  isChannelEnabled?: (channel: PaymentChannel) => boolean;
 }
 
 export interface SubscriptionCheckoutParams {
@@ -145,7 +153,15 @@ export function createPaymentsService({
   grantContentAccess,
   getProvider,
   revenueShareModelPct = DEFAULT_REVENUE_SHARE_MODEL_PCT,
+  isChannelEnabled = isChannelEnabledFromEnv,
 }: PaymentsServiceDeps) {
+  /** Fail closed on a switched-off channel — first statement of every checkout. */
+  function assertChannelEnabled(channel: PaymentChannel): void {
+    if (!isChannelEnabled(channel)) {
+      throw new PaymentError(503, 'payment_channel_unavailable');
+    }
+  }
+
   /** Load the paying subscriber; they must exist and be verified. */
   async function loadCustomer(userId: string) {
     const user = await prisma.user.findUnique({ where: { id: userId } });
@@ -413,6 +429,7 @@ export function createPaymentsService({
   async function issueSubscriptionCharge(
     params: SubscriptionCheckoutParams,
   ): Promise<SubscriptionChargeResult> {
+    assertChannelEnabled(params.provider);
     const model = await prisma.user.findUnique({ where: { id: params.modelId } });
     if (!model || model.role !== 'MODEL') {
       throw new PaymentError(404, 'Model not found');
@@ -463,6 +480,14 @@ export function createPaymentsService({
   return {
     issueSubscriptionCharge,
 
+    /** Whether a channel is live — the routes decide webhook registration by it. */
+    isChannelEnabled,
+
+    /** GET /channels: the enabled checkout channel names, nothing else. */
+    listCheckoutChannels(): CheckoutChannel[] {
+      return CHECKOUT_CHANNELS.filter((channel) => isChannelEnabled(channel));
+    },
+
     /** POST /checkout/subscription. Price comes from the catalog, never the client. */
     async createSubscriptionCheckout(
       params: SubscriptionCheckoutParams,
@@ -473,6 +498,7 @@ export function createPaymentsService({
 
     /** POST /checkout/credits. */
     async createCreditsCheckout(params: CreditsCheckoutParams): Promise<CheckoutResponse> {
+      assertChannelEnabled(params.provider);
       const pack = findCreditPack(params.packId);
       if (!pack) {
         throw new PaymentError(404, 'Credit pack not found');

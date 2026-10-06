@@ -27,6 +27,8 @@ import {
 
 export interface MessagingRoutesOptions extends FastifyPluginOptions {
   service: MessagingService;
+  /** Deployment-wide upload ceiling (`CONTENT_UPLOAD_MAX_BYTES`, Session 13). */
+  maxUploadBytes?: number;
 }
 
 /**
@@ -85,6 +87,11 @@ export default async function messagingRoutes(
   opts: MessagingRoutesOptions,
 ): Promise<void> {
   const { service } = opts;
+  const maxVideoBytes = Math.min(
+    MAX_MESSAGE_VIDEO_BYTES,
+    opts.maxUploadBytes ?? MAX_MESSAGE_VIDEO_BYTES,
+  );
+  const maxImageBytes = Math.min(MAX_MESSAGE_IMAGE_BYTES, maxVideoBytes);
 
   // ── POST /conversations/:modelId ──────────────────────────────────────────
   // Only a subscriber opens a conversation, and only with a model they hold an
@@ -172,7 +179,7 @@ export default async function messagingRoutes(
         // ceiling the stream truncates (throwFileSizeLimit is off) → 413.
         try {
           const parts = request.parts({
-            limits: { fileSize: MAX_MESSAGE_VIDEO_BYTES, files: 1 },
+            limits: { fileSize: maxVideoBytes, files: 1 },
           });
           for await (const part of parts) {
             if (part.type === 'file') {
@@ -214,11 +221,11 @@ export default async function messagingRoutes(
         if (declaredMime !== detected.mime) {
           return reply.code(415).send({ error: 'attachment_content_type_mismatch' });
         }
-        // A truncated stream means the 100 MB ceiling was hit; images cap lower.
+        // A truncated stream means the upload ceiling was hit; images cap lower.
         if (truncated) {
           return reply.code(413).send({ error: 'attachment_too_large' });
         }
-        if (allowed.type === 'IMAGE' && fileBuffer.length > MAX_MESSAGE_IMAGE_BYTES) {
+        if (allowed.type === 'IMAGE' && fileBuffer.length > maxImageBytes) {
           return reply.code(413).send({ error: 'attachment_too_large' });
         }
         attachment = {

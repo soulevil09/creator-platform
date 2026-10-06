@@ -1,0 +1,153 @@
+# =============================================================================
+# Production stack (Session 13, D7) — one droplet, four services.
+#
+#   caddy   the only service publishing ports (80/443); TLS + reverse proxy
+#   api     Fastify, internal only
+#   web     Next.js standalone, internal only
+#   migrate one-off `prisma migrate deploy` (profile `migrate`), API image
+#
+# Run by infra/deploy.sh from /opt/visorfans/releases/<sha>/ (this file ships
+# inside the API image, so a rollback also rolls the infra config back).
+# Interpolated: IMAGE_TAG + VISORFANS_ROOT (set by deploy.sh), and REGISTRY,
+# GHCR_OWNER, API_HOST, APP_HOST, API_TLS (from /opt/visorfans/env/compose.env).
+#
+# Memory (1 GB droplet + 2 GB swap now, 2 GB at launch): limits are ceilings,
+# not reservations. Idle: caddy ~20 MiB, api ~150 MiB, web ~110 MiB.
+#   caddy   64m  — a static-config proxy; Caddy idles at ~15–25 MiB.
+#   api    448m  — 256 MiB V8 heap + Prisma engine + sharp/libvips (capped at
+#                  2 jobs) + one buffered upload (CONTENT_UPLOAD_MAX_BYTES 64 MiB).
+#   web    384m  — 256 MiB V8 heap + Node runtime; SSR of small pages.
+#   migrate 256m — the Prisma schema engine; runs only during a deploy.
+# Sum of steady-state limits = 896m; real usage ~300 MiB, swap absorbs peaks.
+# =============================================================================
+name: visorfans
+
+networks:
+  internal:
+    driver: bridge
+    ipam:
+      config:
+        # PINNED: the API trusts X-Forwarded-For only from this range
+        # (TRUST_PROXY=172.30.0.0/24 in api.env). Change both together.
+        - subnet: 172.30.0.0/24
+
+volumes:
+  caddy_data: # ACME account + certificates — must survive redeploys
+  caddy_config:
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: '3'
+
+x-hardening: &hardening
+  restart: unless-stopped
+  read_only: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  networks:
+    - internal
+  logging: *logging
+
+services:
+  caddy:
+    <<: *hardening
+    image: caddy:2.11.7-alpine@sha256:d76116d819d5162f464b0f2cd09bd28c568a86148c7bc539ce17c33eb22d8bbb
+    cap_add:
+      - NET_BIND_SERVICE
+    ports:
+      - '80:80'
+      - '443:443'
+    environment:
+      API_HOST: ${API_HOST:-api.visorfans.com}
+      APP_HOST: ${APP_HOST:-app.visorfans.com}
+      # Production: the ACME contact email → Let's Encrypt for the api host.
+      API_TLS: ${API_TLS:?set API_TLS (the ACME contact email) in env/compose.env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Cloudflare Origin CA certificate for the proxied app host.
+      - ${VISORFANS_ROOT:-/opt/visorfans}/certs:/certs:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    tmpfs:
+      - /tmp
+    mem_limit: 64m
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+
+  api:
+    <<: *hardening
+    image: ${REGISTRY:-ghcr.io}/${GHCR_OWNER:-soulevil09}/creator-platform-api:${IMAGE_TAG:?IMAGE_TAG is set by deploy.sh}
+    env_file:
+      - ${VISORFANS_ROOT:-/opt/visorfans}/env/api.env
+    expose:
+      - '4000'
+    tmpfs:
+      - /tmp:size=96m
+    mem_limit: 448m
+    stop_grace_period: 20s
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:4000/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 3s
+      start_period: 20s
+      retries: 3
+
+  web:
+    <<: *hardening
+    image: ${REGISTRY:-ghcr.io}/${GHCR_OWNER:-soulevil09}/creator-platform-web:${IMAGE_TAG:?IMAGE_TAG is set by deploy.sh}
+    expose:
+      - '3000'
+    tmpfs:
+      - /tmp
+      # Next writes its runtime cache here; nothing in it needs to persist.
+      - /app/apps/web/.next/cache:uid=1000,gid=1000
+    mem_limit: 384m
+    stop_grace_period: 10s
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 3s
+      start_period: 20s
+      retries: 3
+
+  migrate:
+    <<: *hardening
+    image: ${REGISTRY:-ghcr.io}/${GHCR_OWNER:-soulevil09}/creator-platform-api:${IMAGE_TAG:?IMAGE_TAG is set by deploy.sh}
+    profiles:
+      - migrate
+    restart: 'no'
+    env_file:
+      - ${VISORFANS_ROOT:-/opt/visorfans}/env/api.env
+    environment:
+      NODE_OPTIONS: --max-old-space-size=192
+    command:
+      [
+        'node',
+        'node_modules/prisma/build/index.js',
+        'migrate',
+        'deploy',
+        '--schema',
+        'prisma/schema.prisma',
+      ]
+    tmpfs:
+      - /tmp
+    mem_limit: 256m

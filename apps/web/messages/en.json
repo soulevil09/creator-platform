@@ -24,6 +24,7 @@
     "refreshBalance": "Refresh balance",
     "buyHeading": "Buy credits",
     "paymentMethod": "Payment method",
+    "noChannels": "No payment method is available right now.",
     "channel": {
       "pix": "PIX (BRL)",
       "crypto": "Crypto (USD)"

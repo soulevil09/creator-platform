@@ -20,6 +20,7 @@ import type { FastifyInstance, FastifyPluginOptions, FastifyReply, FastifyReques
 import { authenticate, authorize } from '../../middleware/auth.js';
 import { ContentError } from '../content/content.service.js';
 import { PayoutProviderConfigError } from '../payouts/provider.interface.js';
+import { PayoutError } from '../payouts/payouts.service.js';
 import { AdminError, type AdminService } from './admin.service.js';
 import {
   modelListQuerySchema,
@@ -44,7 +45,9 @@ const WRITE_RATE_LIMIT = { max: 60, timeWindow: '1 hour', keyGenerator: byUser }
 const PAYOUT_RUN_RATE_LIMIT = { max: 2, timeWindow: '1 hour', keyGenerator: byUser };
 
 function sendError(reply: FastifyReply, err: unknown): FastifyReply {
-  if (err instanceof AdminError || err instanceof ContentError) {
+  // PayoutError: the shared run's own typed answers — `payouts_disabled` (503)
+  // when the payout channel is off (Session 13, D1).
+  if (err instanceof AdminError || err instanceof ContentError || err instanceof PayoutError) {
     return reply.code(err.status).send({ error: err.message });
   }
   if (err instanceof PayoutProviderConfigError) {

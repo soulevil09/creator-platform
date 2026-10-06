@@ -59,6 +59,7 @@ import type { PrismaClient } from '../../lib/prisma.js';
 import type { PrismaTransactionClient } from '../wallet/wallet.service.js';
 import type { WebhookHeaders } from '../payments/provider.interface.js';
 import type { IPayoutProvider, NormalizedPayoutEvent } from './provider.interface.js';
+import { isEnabled as isPayoutEnabledFromEnv } from './provider.factory.js';
 
 /** Typed error carrying the HTTP status the route should answer with. */
 export class PayoutError extends Error {
@@ -105,6 +106,12 @@ export interface PayoutsServiceDeps {
   minThresholdCents: number;
   /** Currency Paxum settles in, used when claimed rows disagree. */
   payoutCurrency: Currency;
+  /**
+   * Whether the payout channel has a live adapter (Session 13, D1). A run with
+   * payouts disabled answers 503 `payouts_disabled` before any database access.
+   * Ledger reads (balance, history) keep working. Defaults to the factory.
+   */
+  isEnabled?: () => boolean;
 }
 
 /** What one model's slot in a run did. */
@@ -146,6 +153,7 @@ export function createPayoutsService({
   getProvider,
   minThresholdCents,
   payoutCurrency,
+  isEnabled = isPayoutEnabledFromEnv,
 }: PayoutsServiceDeps) {
   /** SUM(modelShareCents) over this model's confirmed, unclaimed earnings. */
   async function availableBalance(
@@ -374,6 +382,8 @@ export function createPayoutsService({
   }
 
   return {
+    /** Whether the payout channel is live — the routes decide webhook registration by it. */
+    isEnabled,
     /** GET /balance — the caller's own payable balance. */
     async getBalance(modelId: string): Promise<PayoutBalanceResponse> {
       const [availableCents, profile] = await Promise.all([
@@ -472,6 +482,11 @@ export function createPayoutsService({
       trigger: PayoutRunTrigger = { source: 'cron' },
       now: Date = new Date(),
     ): Promise<PayoutRunSummary> {
+      // Both entrances (cron, admin) land here; the cron's secret check has
+      // already run, so a 401 still wins over this 503.
+      if (!isEnabled()) {
+        throw new PayoutError(503, 'payouts_disabled');
+      }
       const provider = getProvider();
       const period = {
         start: new Date(now.getTime() - PAYOUT_PERIOD_DAYS * 24 * 60 * 60 * 1000),

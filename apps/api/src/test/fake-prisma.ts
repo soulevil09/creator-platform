@@ -574,6 +574,25 @@ export function createFakePrisma() {
     },
 
     modelProfile: {
+      /** Session 13 (D4): the ops CLI creates a model's minimal profile. */
+      create: async ({ data }: { data: Partial<FakeProfile> & { userId: string } }) => {
+        const now = new Date();
+        const row: FakeProfile = {
+          displayName: '',
+          aiConsent: false,
+          payoutEmail: null,
+          approvalStatus: 'PENDING',
+          approvalReviewedAt: null,
+          approvalRejectionReason: null,
+          currency: 'USD',
+          ...data,
+          id: nextId('mp'),
+          createdAt: now,
+          updatedAt: now,
+        };
+        profiles.push(row);
+        return row;
+      },
       findUnique: async ({ where }: { where: Where }) =>
         profiles.find(
           (p) =>

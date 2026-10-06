@@ -152,27 +152,30 @@ export default async function payoutRoutes(
 
   // ── POST /paxum/webhook ───────────────────────────────────────────────────
   // No auth — authenticity comes from the signature, which is checked before
-  // any database access. Rate limited by IP as a cheap flood guard.
-  app.post(
-    '/paxum/webhook',
-    { config: { rateLimit: { max: 120, timeWindow: '1 minute' } } },
-    async (request, reply) => {
-      const rawBody = request.rawBody;
-      if (!rawBody) {
-        return reply.code(400).send({ error: 'Missing request body' });
-      }
-      try {
-        const outcome = await service.handleWebhook(rawBody, request.headers);
-        return reply.code(200).send({
-          received: true,
-          processed: outcome.processed,
-          duplicate: outcome.duplicate,
-        });
-      } catch (err) {
-        return sendError(reply, err);
-      }
-    },
-  );
+  // any database access. Rate limited by IP as a cheap flood guard. Registered
+  // only while payouts are enabled (Session 13, D1): disabled, it is a 404.
+  if (service.isEnabled()) {
+    app.post(
+      '/paxum/webhook',
+      { config: { rateLimit: { max: 120, timeWindow: '1 minute' } } },
+      async (request, reply) => {
+        const rawBody = request.rawBody;
+        if (!rawBody) {
+          return reply.code(400).send({ error: 'Missing request body' });
+        }
+        try {
+          const outcome = await service.handleWebhook(rawBody, request.headers);
+          return reply.code(200).send({
+            received: true,
+            processed: outcome.processed,
+            duplicate: outcome.duplicate,
+          });
+        } catch (err) {
+          return sendError(reply, err);
+        }
+      },
+    );
+  }
 
   // ── GET / (ADMIN) ─────────────────────────────────────────────────────────
   // Minimal operational visibility until Session 11 owns the dashboard.

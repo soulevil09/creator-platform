@@ -53,6 +53,11 @@ generator client {
   // Generated client lives under prisma/generated/ (gitignored), keeping the
   // committed tree free of generated code.
   output   = "generated/client"
+  // Session 13: `native` for whatever machine generates (macOS dev, arm64
+  // local images), plus the engine for the production image
+  // (node:22-bookworm-slim, OpenSSL 3, linux/amd64 and arm64 both resolve to
+  // debian-openssl-3.0.x on their own arch when generated inside the image).
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
 }
 
 datasource db {

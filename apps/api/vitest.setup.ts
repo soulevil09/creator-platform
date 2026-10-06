@@ -5,6 +5,10 @@ process.env.NODE_ENV = 'test';
 process.env.JWT_SECRET ??= 'test-jwt-secret-at-least-32-characters-long!!';
 process.env.JWT_REFRESH_SECRET ??= 'test-refresh-secret-at-least-32-characters-long!';
 process.env.EMAIL_API_KEY ??= 're_test_key';
+// Session 13 (D1): every provider channel defaults to `disabled` when unset.
+// The suites exercise the enabled paths, so each channel is named explicitly
+// below; the disabled paths are tested by overriding per server/test.
+process.env.EMAIL_PROVIDER ??= 'mock';
 process.env.APP_URL ??= 'http://localhost:3000';
 process.env.EMAIL_FROM ??= 'noreply@test.local';
 // Storage secrets validated eagerly by src/lib/env.ts. Tests inject an

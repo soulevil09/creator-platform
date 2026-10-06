@@ -18,7 +18,7 @@ import type { StorageClient } from '../lib/storage.js';
 import type { ImageProcessor } from '../lib/image.js';
 import { createFakeEmailer, createFakePrisma } from '../test/fake-prisma.js';
 import type { RouteInventoryEntry } from './route-inventory.js';
-import { PUBLIC_ROUTES, UNLIMITED_ROUTES } from './route-policy.js';
+import { CONDITIONAL_ROUTES, PUBLIC_ROUTES, UNLIMITED_ROUTES } from './route-policy.js';
 
 const fakeStorage: StorageClient = {
   uploadFile: vi.fn(async (_b: string, key: string) => key),
@@ -33,21 +33,47 @@ const fakeImages: ImageProcessor = {
 
 const keyOf = (entry: RouteInventoryEntry) => `${entry.method} ${entry.url}`;
 
-let inventory: RouteInventoryEntry[];
+/**
+ * Session 13 (D1): which routes exist depends on which provider channels are
+ * enabled, so the whole policy is checked against both extremes. A conditional
+ * route may be missing when its channel is off — and nothing else changes:
+ * whenever it IS registered it must pass every rule below.
+ */
+const CONFIGURATIONS = {
+  'all channels enabled': {
+    pix: true,
+    crypto: true,
+    card: true,
+    payout: true,
+    ai: true,
+    email: true,
+  },
+  'all channels disabled': {
+    pix: false,
+    crypto: false,
+    card: false,
+    payout: false,
+    ai: false,
+    email: false,
+  },
+} as const;
 
-beforeAll(async () => {
-  const app = await buildServer({
-    prisma: createFakePrisma() as unknown as PrismaClient,
-    emailer: createFakeEmailer(),
-    storage: fakeStorage,
-    images: fakeImages,
+describe.each(Object.entries(CONFIGURATIONS))('route security inventory — %s', (label, enabled) => {
+  let inventory: RouteInventoryEntry[];
+
+  beforeAll(async () => {
+    const app = await buildServer({
+      prisma: createFakePrisma() as unknown as PrismaClient,
+      emailer: createFakeEmailer(),
+      storage: fakeStorage,
+      images: fakeImages,
+      enabled,
+    });
+    await app.ready();
+    inventory = [...app.routeInventory];
+    await app.close();
   });
-  await app.ready();
-  inventory = [...app.routeInventory];
-  await app.close();
-});
 
-describe('route security inventory', () => {
   it('sees the whole API (sanity: the collector is actually wired)', () => {
     const keys = inventory.map(keyOf);
     expect(keys.length).toBeGreaterThan(50);
@@ -81,7 +107,10 @@ describe('route security inventory', () => {
     const byKey = new Map(inventory.map((entry) => [keyOf(entry), entry]));
     const stale = Object.keys(PUBLIC_ROUTES).filter((key) => {
       const entry = byKey.get(key);
-      return !entry || entry.authenticated;
+      // Absent is fine only for a conditional route; present, it must still
+      // genuinely be unauthenticated for the entry to be meaningful.
+      if (!entry) return !(key in CONDITIONAL_ROUTES);
+      return entry.authenticated;
     });
     expect(stale, `stale PUBLIC_ROUTES entries: ${stale.join(', ')}`).toEqual([]);
   });
@@ -90,14 +119,31 @@ describe('route security inventory', () => {
     const byKey = new Map(inventory.map((entry) => [keyOf(entry), entry]));
     const stale = Object.keys(UNLIMITED_ROUTES).filter((key) => {
       const entry = byKey.get(key);
-      return !entry || entry.rateLimited;
+      if (!entry) return !(key in CONDITIONAL_ROUTES);
+      return entry.rateLimited;
     });
     expect(stale, `stale UNLIMITED_ROUTES entries: ${stale.join(', ')}`).toEqual([]);
   });
 
   it('every allowlist entry carries a reason', () => {
-    for (const reason of [...Object.values(PUBLIC_ROUTES), ...Object.values(UNLIMITED_ROUTES)]) {
+    for (const reason of [
+      ...Object.values(PUBLIC_ROUTES),
+      ...Object.values(UNLIMITED_ROUTES),
+      ...Object.values(CONDITIONAL_ROUTES),
+    ]) {
       expect(reason.trim().length).toBeGreaterThan(10);
     }
+  });
+
+  it('conditional routes are present exactly when their channel is enabled', () => {
+    const keys = new Set(inventory.map(keyOf));
+    for (const key of Object.keys(CONDITIONAL_ROUTES)) {
+      expect(keys.has(key), `${key} (${label})`).toBe(label === 'all channels enabled');
+    }
+  });
+
+  it('the channel list is always registered', () => {
+    const keys = new Set(inventory.map(keyOf));
+    expect(keys.has('GET /api/payments/channels')).toBe(true);
   });
 });

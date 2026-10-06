@@ -57,6 +57,7 @@ import { buildAnchorPrompt } from './anchor.js';
 import { checkPromptSafety, hashPrompt } from './safety.js';
 import { presetPromptFor } from './presets.js';
 import { AIProviderError, type IAIProvider } from './provider.interface.js';
+import { isEnabled as isAIEnabledFromEnv } from './provider.factory.js';
 import type { CreateGenerationInput } from './generation.schema.js';
 
 /**
@@ -111,6 +112,12 @@ export interface GenerationServiceDeps {
   /** Session 09: mints the per-viewer trace code and writes its AuditLog row. */
   trace: TraceRecorder;
   logger?: GenerationLogger;
+  /**
+   * Whether AI generation has a live adapter (Session 13, D1). Creating a job
+   * while disabled answers 503 `generation_unavailable` before any credit is
+   * debited; reads of existing jobs keep working. Defaults to the factory.
+   */
+  isEnabled?: () => boolean;
 }
 
 /** Image serve result: caller streams these bytes with no-store headers. */
@@ -198,6 +205,7 @@ export function createGenerationService({
   retentionDays,
   trace,
   logger = noopLogger,
+  isEnabled = isAIEnabledFromEnv,
 }: GenerationServiceDeps) {
   /**
    * Load a job the caller owns. Unknown id and someone else's id are the
@@ -276,6 +284,11 @@ export function createGenerationService({
       subscriberId: string,
       input: CreateGenerationInput,
     ): Promise<CreateGenerationResponse> {
+      // 0. Session 13: AI off → refuse before any read, debit or job row.
+      if (!isEnabled()) {
+        throw new GenerationError(503, 'generation_unavailable');
+      }
+
       // 1. The target must be a MODEL with a profile.
       const model = await prisma.user.findUnique({ where: { id: input.modelId } });
       if (!model || model.role !== 'MODEL') {

@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# =============================================================================
+# SSH forced command for the CI deploy key (Session 13, D8). Installed by
+# bootstrap.sh at /opt/visorfans/bin/deploy-gate, owned by root (the deploy
+# user cannot edit it), and wired in /home/deploy/.ssh/authorized_keys as:
+#
+#   command="/opt/visorfans/bin/deploy-gate",restrict ssh-ed25519 AAAA… ci-deploy
+#
+# Whatever the client asked to run arrives in SSH_ORIGINAL_COMMAND. The only
+# accepted form is `deploy <hex sha>`; anything else — a shell, scp, a second
+# argument, shell metacharacters — is refused before anything executes.
+# =============================================================================
+set -euo pipefail
+request="${SSH_ORIGINAL_COMMAND:-}"
+if [[ "$request" =~ ^deploy\ ([0-9a-f]{7,40})$ ]]; then
+  exec /opt/visorfans/bin/deploy.sh "${BASH_REMATCH[1]}"
+fi
+echo "deploy-gate: refused" >&2
+exit 1

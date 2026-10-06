@@ -1,0 +1,78 @@
+# =============================================================================
+# Caddy (Session 13, D7). Shipped inside the API image; deploy.sh extracts it
+# per release. Hosts and the api TLS issuer come from the environment so the
+# same file runs in production and in the local stack (infra/local/).
+#
+#   API_HOST  api.visorfans.com — Cloudflare DNS ONLY → Let's Encrypt (ACME)
+#   APP_HOST  app.visorfans.com — Cloudflare PROXIED → Cloudflare Origin CA
+#             certificate from /certs (SSL mode "Full (strict)")
+#   API_TLS   production: the ACME contact email; local: `internal`
+#
+# Client IPs: Caddy is NOT told to trust any upstream proxy (no
+# `trusted_proxies`), so it discards whatever X-Forwarded-For a client sends
+# and sets it to the address the connection really came from. The API trusts
+# X-Forwarded-For only from the compose subnet (TRUST_PROXY=172.30.0.0/24), so
+# it sees exactly one hop — Caddy — and a spoofed header changes nothing.
+#
+# The app host does not need real client IPs: behind Cloudflare, Caddy sees a
+# Cloudflare edge address, and that is fine — the Next server applies no
+# IP-based logic (no rate limits, no geo). Every IP-scoped control lives in the
+# API, which browsers reach directly on the DNS-only api host.
+# =============================================================================
+{
+	# The local stack's internal CA must not try to write the (read-only)
+	# container trust store; production uses no internal CA at all.
+	skip_install_trust
+
+	# HTTP/1.1 + HTTP/2 only: the droplet firewall opens TCP 80/443, not UDP.
+	servers {
+		protocols h1 h2
+	}
+}
+
+{$API_HOST} {
+	tls {$API_TLS}
+
+	# CONTENT_UPLOAD_MAX_BYTES is 64 MiB (67,108,864 B). 70 MiB leaves ~6 MiB
+	# for multipart framing and form fields; the API's own limit stays the
+	# binding one (413 from the app, with its own error body).
+	request_body {
+		max_size 70MiB
+	}
+
+	# WebSocket upgrades (/ws/messages) are proxied transparently.
+	reverse_proxy api:4000
+
+	# The API sets its security headers itself (helmet) — none are added here,
+	# so nothing is duplicated. Only Caddy's own fingerprints are removed
+	# (deferred, so they are stripped after the proxy has added them).
+	header {
+		-Server
+		-Via
+		defer
+	}
+}
+
+{$APP_HOST} {
+	tls /certs/app.pem /certs/app.key
+
+	request_body {
+		max_size 1MiB
+	}
+
+	reverse_proxy web:3000
+
+	# Next sets the CSP (per-request nonce) and the static security headers.
+	header {
+		-Server
+		-Via
+		defer
+	}
+}
+
+# Any other Host over plain HTTP: drop the connection — no default site, no
+# page that confirms what this IP serves. An unknown SNI over HTTPS gets no
+# certificate at all, so its TLS handshake fails.
+http:// {
+	abort
+}

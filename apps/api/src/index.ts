@@ -18,8 +18,11 @@ import { authenticate } from './middleware/auth.js';
 import { installErrorHandling } from './security/error-handler.js';
 import { installRouteInventory } from './security/route-inventory.js';
 import { prisma as defaultPrisma, type PrismaClient } from './lib/prisma.js';
-import { createResendEmailer, type Emailer } from './lib/email.js';
+import { createEmailer, isEnabled as isEmailEnabled, type Emailer } from './lib/email.js';
+import type { ProviderChannel } from './lib/provider-mode.js';
 import { createS3StorageClient, type StorageClient } from './lib/storage.js';
+import { databaseReady, type ReadinessDb } from './lib/readiness.js';
+import { flushSentry, initSentry } from './lib/sentry.js';
 import { createSharpImageProcessor, type ImageProcessor } from './lib/image.js';
 import type { IPaymentProvider } from './modules/payments/provider.interface.js';
 import { createAuthService } from './modules/auth/auth.service.js';
@@ -35,12 +38,14 @@ import paymentRoutes from './modules/payments/payments.routes.js';
 import {
   assertPaymentProvidersConfigured,
   getPaymentProvider,
+  isEnabled as isPaymentChannelEnabled,
 } from './modules/payments/provider.factory.js';
 import { createPayoutsService } from './modules/payouts/payouts.service.js';
 import payoutRoutes from './modules/payouts/payouts.routes.js';
 import {
   assertPayoutProviderConfigured,
   getPayoutProvider,
+  isEnabled as isPayoutEnabled,
 } from './modules/payouts/provider.factory.js';
 import type { IPayoutProvider } from './modules/payouts/provider.interface.js';
 import { createSubscriptionsService } from './modules/subscriptions/subscriptions.service.js';
@@ -54,6 +59,7 @@ import generationRoutes from './modules/generation/generation.routes.js';
 import {
   assertAIProviderConfigured,
   getAIProvider,
+  isEnabled as isAIEnabled,
 } from './modules/generation/provider.factory.js';
 import type { IAIProvider } from './modules/generation/provider.interface.js';
 import { createTraceRecorder } from './modules/protection/trace.js';
@@ -99,16 +105,30 @@ export interface BuildServerOptions {
   trustProxy?: TrustProxySetting;
   /** Override "send HSTS" (defaults to `env.isProduction`; tests exercise both). */
   hsts?: boolean;
+  /**
+   * Override which provider channels are live (Session 13, D1). Unset channels
+   * follow their env var through the factory's `isEnabled`. Tests use this to
+   * build the same server all-disabled and all-enabled without touching env.
+   */
+  enabled?: Partial<Record<ProviderChannel, boolean>>;
 }
 
 export async function buildServer(opts: BuildServerOptions = {}) {
   const prisma = opts.prisma ?? defaultPrisma;
-  const emailer = opts.emailer ?? createResendEmailer();
   const storage = opts.storage ?? createS3StorageClient();
   const images = opts.images ?? createSharpImageProcessor();
   const getProvider = opts.getPaymentProvider ?? getPaymentProvider;
   const getPayoutAdapter = opts.getPayoutProvider ?? getPayoutProvider;
   const getAIAdapter = opts.getAIProvider ?? getAIProvider;
+
+  // Which channels are live (Session 13, D1). Business code receives these
+  // predicates; it never reads a provider env var itself.
+  const enabled = opts.enabled ?? {};
+  const channelEnabled = (channel: PaymentChannel) =>
+    enabled[channel] ?? isPaymentChannelEnabled(channel);
+  const payoutsEnabled = () => enabled.payout ?? isPayoutEnabled();
+  const aiEnabled = () => enabled.ai ?? isAIEnabled();
+  const emailEnabled = () => enabled.email ?? isEmailEnabled();
 
   // Fail fast: an unknown PAYMENT_PROVIDER_* value must stop the process here,
   // not surface later as a failed checkout in production.
@@ -148,6 +168,10 @@ export async function buildServer(opts: BuildServerOptions = {}) {
           }
         : false,
   });
+
+  // EMAIL_PROVIDER picks Resend (non-production), the logging mock, or the
+  // disabled emailer that throws if a call site forgets to check first.
+  const emailer = opts.emailer ?? createEmailer(app.log);
 
   // ── Error surface (Session 12, D2) ────────────────────────────────────────
   // Installed on the root before any plugin, so every route inherits it: a 5xx
@@ -222,7 +246,7 @@ export async function buildServer(opts: BuildServerOptions = {}) {
     limits: { fileSize: MAX_UPLOAD_BYTES, files: 1 },
   });
 
-  // Liveness/readiness probe.
+  // Liveness probe: no database, constant time. Docker's HEALTHCHECK uses it.
   app.get('/health', async () => ({
     status: 'ok',
     service: APP_NAME,
@@ -231,7 +255,21 @@ export async function buildServer(opts: BuildServerOptions = {}) {
     timestamp: new Date().toISOString(),
   }));
 
-  const authService = createAuthService({ prisma, emailer });
+  // Readiness probe (Session 13, D5): one bounded `SELECT 1`. Answers only
+  // ok/unavailable — no error text, host or version. Called by deploy.sh while
+  // waiting for a release and by the smoke test, not by the 15 s Docker
+  // healthcheck (that is liveness), so a modest per-IP limit costs nothing and
+  // keeps it from becoming a free way to make us query the database.
+  app.get(
+    '/health/ready',
+    { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } },
+    async (_request, reply) => {
+      const ready = await databaseReady(prisma as unknown as ReadinessDb);
+      return reply.code(ready ? 200 : 503).send({ status: ready ? 'ok' : 'unavailable' });
+    },
+  );
+
+  const authService = createAuthService({ prisma, emailer, isEmailEnabled: emailEnabled });
   await app.register(authRoutes, { prefix: '/api/auth', service: authService });
 
   const onboardingService = createOnboardingService({
@@ -260,6 +298,7 @@ export async function buildServer(opts: BuildServerOptions = {}) {
   await app.register(contentRoutes, {
     prefix: '/api/content',
     service: contentService,
+    maxUploadBytes: env.CONTENT_UPLOAD_MAX_BYTES,
   });
 
   const walletService = createWalletService({ prisma });
@@ -273,6 +312,7 @@ export async function buildServer(opts: BuildServerOptions = {}) {
     grantContentAccess: contentService.grantContentAccess,
     getProvider,
     revenueShareModelPct: env.REVENUE_SHARE_MODEL_PCT,
+    isChannelEnabled: channelEnabled,
   });
   await app.register(paymentRoutes, { prefix: '/api/payments', service: paymentsService });
 
@@ -285,6 +325,9 @@ export async function buildServer(opts: BuildServerOptions = {}) {
     issueSubscriptionCharge: paymentsService.issueSubscriptionCharge,
     reminderDays: env.SUBSCRIPTION_RENEWAL_REMINDER_DAYS,
     gracePeriodDays: env.SUBSCRIPTION_GRACE_PERIOD_DAYS,
+    isChannelEnabled: channelEnabled,
+    isEmailEnabled: emailEnabled,
+    logger: app.log,
   });
   await app.register(subscriptionRoutes, {
     prefix: '/api/subscriptions',
@@ -307,6 +350,7 @@ export async function buildServer(opts: BuildServerOptions = {}) {
   await app.register(messagingRoutes, {
     prefix: '/api/messages',
     service: messagingService,
+    maxUploadBytes: env.CONTENT_UPLOAD_MAX_BYTES,
   });
   // Registered at the root, not under /api: the socket is a transport, not a
   // REST resource, and the upgrade path is what a client dials directly.
@@ -318,6 +362,7 @@ export async function buildServer(opts: BuildServerOptions = {}) {
     getProvider: getPayoutAdapter,
     minThresholdCents: env.PAYOUT_MIN_THRESHOLD_CENTS,
     payoutCurrency: env.PAYOUT_CURRENCY,
+    isEnabled: payoutsEnabled,
   });
   await app.register(payoutRoutes, { prefix: '/api/payouts', service: payoutsService });
 
@@ -337,6 +382,7 @@ export async function buildServer(opts: BuildServerOptions = {}) {
     retentionDays: env.GENERATION_IMAGE_RETENTION_DAYS,
     trace,
     logger: app.log,
+    isEnabled: aiEnabled,
   });
   await app.register(generationRoutes, {
     prefix: '/api/generations',
@@ -393,11 +439,27 @@ export async function buildServer(opts: BuildServerOptions = {}) {
 }
 
 async function start(): Promise<void> {
+  // Before the server is built, so a failure during boot is reported too.
+  // Inert without SENTRY_DSN (Session 13, D3).
+  initSentry(env);
   const app = await buildServer();
+
+  // Docker stops containers with SIGTERM: drain in-flight requests, flush any
+  // queued Sentry events, then exit — a redeploy should not cut requests off.
+  for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+    process.once(signal, () => {
+      void app
+        .close()
+        .then(() => flushSentry())
+        .finally(() => process.exit(0));
+    });
+  }
+
   try {
     await app.listen({ port: PORT, host: '0.0.0.0' });
   } catch (err) {
     app.log.error(err);
+    await flushSentry();
     process.exit(1);
   }
 }

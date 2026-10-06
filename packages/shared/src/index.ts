@@ -399,7 +399,12 @@ export type MySubscriptionsResponse = {
  * secret, so the response must not double as a subscriber-history oracle.
  */
 export type SubscriptionRenewalRunSummary = {
+  /** Renewal charges issued (the reminder email is counted separately). */
   remindersIssued: number;
+  /** Of those, how many went out without an email because email is disabled. */
+  remindersSkipped: number;
+  /** Due subscriptions whose payment channel is disabled: no charge issued. */
+  skippedChannelDisabled: number;
   movedToPastDue: number;
   movedToExpired: number;
   movedToCanceled: number;
@@ -1019,3 +1024,16 @@ export type AdminResolveReportResponse = {
  * function; the audit row records which one it was.
  */
 export type PayoutRunTrigger = { source: 'cron' } | { source: 'admin'; actorId: string };
+
+// ─── Error monitoring (Session 13) ───────────────────────────────────────────
+// The Sentry PII scrubber both apps install as beforeSend /
+// beforeSendTransaction / beforeBreadcrumb. Framework-free (no Sentry import).
+export {
+  REDACTED,
+  SENTRY_DATA_COLLECTION,
+  scrubSentryBreadcrumb,
+  scrubSentryEvent,
+  scrubString,
+  scrubValue,
+  stripQuery,
+} from './sentry-scrub';

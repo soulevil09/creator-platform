@@ -75,6 +75,15 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm turbo run build
+      # Session 13 (D6): the API ships as an esbuild bundle. Boot it (and the
+      # ops CLI) for real, so a bundle that cannot start fails here, not in a
+      # deploy.
+      - name: Boot the API bundle and the ops CLI
+        run: node apps/api/scripts/check-bundle.mjs
+      # The unit suite fakes the image processor; this drives REAL sharp
+      # (3000px, transparent PNG, EXIF-rotated JPEG with GPS, 64 MP bomb).
+      - name: Watermark with real sharp
+        run: pnpm --filter @creator-platform/api exec tsx scripts/check-watermark.ts
 
   # Production dependency audit (Session 12, D0). Fails on any high/critical
   # advisory. Exceptions live in root package.json `pnpm.auditConfig`, each

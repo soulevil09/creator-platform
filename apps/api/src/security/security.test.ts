@@ -91,9 +91,8 @@ describe('D1 — parseTrustProxy', () => {
     expect(parseTrustProxy('0')).toBe(false);
   });
 
-  it('parses a hop count and a comma-separated list of IPs/CIDRs', () => {
-    expect(parseTrustProxy('1')).toBe(1);
-    expect(parseTrustProxy('2')).toBe(2);
+  it('parses a comma-separated list of IPs/CIDRs', () => {
+    expect(parseTrustProxy('172.30.0.0/24')).toEqual(['172.30.0.0/24']);
     expect(parseTrustProxy('10.0.0.0/8, 127.0.0.1 ,::1,fd00::/8')).toEqual([
       '10.0.0.0/8',
       '127.0.0.1',
@@ -108,7 +107,11 @@ describe('D1 — parseTrustProxy', () => {
     expect(() => parseTrustProxy('loopback')).toThrow(/TRUST_PROXY/);
     expect(() => parseTrustProxy('10.0.0.0/33')).toThrow(/TRUST_PROXY/);
     expect(() => parseTrustProxy('999.1.1.1')).toThrow(/TRUST_PROXY/);
-    expect(() => parseTrustProxy('11')).toThrow(/hop count/);
+  });
+
+  it('refuses a hop count: fastify >=5.12.5 would silently trust no proxy at all (Session 13)', () => {
+    expect(() => parseTrustProxy('1')).toThrow(/hop count/);
+    expect(() => parseTrustProxy('2')).toThrow(/CIDR/);
   });
 });
 
@@ -131,8 +134,12 @@ describe('D1 — client IP behind a proxy', () => {
     return app;
   }
 
-  it('TRUST_PROXY=1: X-Forwarded-For is the client, and the login limit counts against it', async () => {
-    const app = await withIpEcho(1);
+  // `inject` connects from 127.0.0.1, which plays the reverse proxy (Caddy) here:
+  // the production setting names the compose subnet Caddy sits on.
+  const PROXY = ['127.0.0.0/8'];
+
+  it('TRUST_PROXY=<proxy CIDR>: X-Forwarded-For is the client, and the login limit counts against it', async () => {
+    const app = await withIpEcho(PROXY);
 
     const echo = await app.inject({
       method: 'GET',
@@ -149,8 +156,8 @@ describe('D1 — client IP behind a proxy', () => {
     expect((await login(app, OTHER)).statusCode).toBe(400);
   });
 
-  it('TRUST_PROXY=1: a multi-hop X-Forwarded-For resolves to the right-most untrusted hop, not the client-supplied left-most', async () => {
-    const app = await withIpEcho(1);
+  it('TRUST_PROXY=<proxy CIDR>: a client-spoofed X-Forwarded-For prefix does not change the rate-limit key', async () => {
+    const app = await withIpEcho(PROXY);
 
     // Socket = the one trusted proxy (inject's 127.0.0.1). Everything left of the
     // hop it appended was written by the client and must not choose the key.
