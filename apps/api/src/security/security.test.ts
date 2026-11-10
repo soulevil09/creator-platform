@@ -6,14 +6,15 @@
 //   D2  security headers on every reply (HSTS in production only), and an
 //       error surface that never leaks a 5xx message, a stack, or input.
 //   D4  login does the same bcrypt work for unknown and known emails, and a
-//       token signed with any algorithm but HS256 is refused.
+//       token signed with any algorithm but HS256 is refused (Session 13.1:
+//       plus `alg: none`, RS256, and an HS256-signed JSON-array payload).
 //
 // Same harness as every other suite: the shared in-memory Prisma fake through
 // `buildServer`, driven with `inject`. Routes that exist only to prove a
 // property (an echo of `request.ip`, a throwing handler) are registered on the
 // test's own instance, never on the real server.
 // =============================================================================
-import { createHmac } from 'node:crypto';
+import { createHmac, createSign, generateKeyPairSync } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildServer, type BuildServerOptions } from '../index.js';
@@ -21,6 +22,7 @@ import type { PrismaClient } from '../lib/prisma.js';
 import type { StorageClient } from '../lib/storage.js';
 import type { ImageProcessor } from '../lib/image.js';
 import { parseTrustProxy } from '../lib/env.js';
+import { authenticate } from '../middleware/auth.js';
 import { createAuthService } from '../modules/auth/auth.service.js';
 import {
   createFakeEmailer,
@@ -455,5 +457,64 @@ describe('D4 — JWT algorithm is pinned to HS256', () => {
       cookies: { access_token: forge('HS256', secret, payload) },
     });
     expect(hs256.statusCode).toBe(200);
+  });
+
+  // Session 13.1. These go through `authenticate` on a test-only route, so a
+  // 401 is the middleware's verdict and not a later handler's lookup failing.
+  async function makeProbe() {
+    const { app } = await makeApp();
+    app.get('/__test/whoami', { preHandler: authenticate }, async (request) => ({
+      user: request.user,
+    }));
+    return app;
+  }
+  const now = () => Math.floor(Date.now() / 1000);
+  const probe = (app: Awaited<ReturnType<typeof makeProbe>>, token: string) =>
+    app.inject({ method: 'GET', url: '/__test/whoami', cookies: { access_token: token } });
+
+  it('rejects an HS256-signed token whose payload is a JSON array (GHSA-5hjw-83fp-phq9)', async () => {
+    const app = await makeProbe();
+    const secret = process.env.JWT_SECRET!;
+    const claims = { userId: 'u_sub', role: 'subscriber', iat: now(), exp: now() + 600 };
+
+    const head = `${b64url({ alg: 'HS256', typ: 'JWT' })}.${b64url([claims])}`;
+    const signature = createHmac('sha256', secret).update(head).digest('base64url');
+    const res = await probe(app, `${head}.${signature}`);
+    expect(res.statusCode).toBe(401);
+    expect(res.json()).toEqual({ error: 'Unauthorized' });
+
+    // An already-expired array payload is refused too: the claim checks
+    // cannot be skipped by wrapping the claims in an array.
+    const expiredHead = `${b64url({ alg: 'HS256', typ: 'JWT' })}.${b64url([
+      { ...claims, iat: now() - 7200, exp: now() - 3600 },
+    ])}`;
+    const expiredSig = createHmac('sha256', secret).update(expiredHead).digest('base64url');
+    expect((await probe(app, `${expiredHead}.${expiredSig}`)).statusCode).toBe(401);
+
+    // Control: the same claims as an object pass `authenticate`.
+    expect((await probe(app, forge('HS256', secret, claims))).statusCode).toBe(200);
+  });
+
+  it('rejects tokens signed with a non-HS256 algorithm: none, RS256, HS384, HS512', async () => {
+    const app = await makeProbe();
+    const secret = process.env.JWT_SECRET!;
+    const claims = { userId: 'u_sub', role: 'subscriber', iat: now(), exp: now() + 600 };
+
+    // Unsigned.
+    const unsigned = `${b64url({ alg: 'none', typ: 'JWT' })}.${b64url(claims)}.`;
+    expect((await probe(app, unsigned)).statusCode).toBe(401);
+
+    // RS256 with a key generated in-test (never a fixture).
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const rsHead = `${b64url({ alg: 'RS256', typ: 'JWT' })}.${b64url(claims)}`;
+    const rsSig = createSign('RSA-SHA256').update(rsHead).sign(privateKey).toString('base64url');
+    expect((await probe(app, `${rsHead}.${rsSig}`)).statusCode).toBe(401);
+
+    for (const alg of ['HS384', 'HS512'] as const) {
+      expect((await probe(app, forge(alg, secret, claims))).statusCode).toBe(401);
+    }
+
+    // Control: HS256 with the same claims and secret is accepted.
+    expect((await probe(app, forge('HS256', secret, claims))).statusCode).toBe(200);
   });
 });

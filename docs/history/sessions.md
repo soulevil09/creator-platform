@@ -559,3 +559,63 @@ paused → resumed, no data loss.
 **External prerequisites still open.** Paxum Business account, Replicate
 account, Woovi credentials + adult-policy confirmation, an adult-compatible
 email provider, the Supabase Pro decision, the NOWPayments custody decision.
+
+## Session 13.1 — Hotfix: Production Dependency Advisories ✅
+
+**Summary.** CI run `42730500701` on `main` (`d4707f6`, docs-only) failed only
+in `Audit`: new advisories put 28 findings (6 low, 13 moderate, 6 high,
+3 critical) in the production tree, and production (`471cefc`) runs the same
+versions. The D1 inventory matched the CI count exactly:
+
+| Sev | Package | GHSA | Path | Patched | Fixed by |
+|---|---|---|---|---|---|
+| critical | fast-jwt 6.2.4 | GHSA-ww5h-9m49-7xx4 (RSA→HS256 confusion, incomplete patch) | api > @fastify/jwt > fast-jwt | ≥6.3.0 | 6.3.6 |
+| critical | next 16.3.6 | GHSA-2464-fhr4-w9xw (RCE, Image Optimization + SVG) | web > next | ≥16.4.1 | 16.4.6 |
+| critical | next 16.3.6 | GHSA-673q-mjm6-r5xr (RCE, `use cache` typed arrays) | web > next | ≥16.4.1 | 16.4.6 |
+| high | fast-jwt 6.2.4 | GHSA-8wpc-h4q6-8fxv (unsigned JWT with ''/null key) | api > @fastify/jwt > fast-jwt | ≥6.3.1 | 6.3.6 |
+| high | fast-jwt 6.2.4 | GHSA-5hjw-83fp-phq9 (claim validators skipped for array payload) | api > @fastify/jwt > fast-jwt | ≥6.3.0 | 6.3.6 |
+| high | fast-jwt 6.2.4 | GHSA-g3jj-5cmm-3hxx (public JWK as HMAC secret) | api > @fastify/jwt > fast-jwt | ≥6.3.0 | 6.3.6 |
+| high | next 16.3.6 | GHSA-cjq9-62q9-8jv4 (SSRF, Image Optimization) | web > next | ≥16.3.8 | 16.4.6 |
+| high | next 16.3.6 | GHSA-p3m5-59mp-jv5r (DoS, Server Actions) | web > next | ≥16.4.1 | 16.4.6 |
+| high | zod 4.4.3 | GHSA-mrhx-c7xc-m3w5 (memory exhaustion, constrained collections) | api > zod | ≥4.6.6 | 4.6.7 |
+
+- **Upgrades (direct dependencies only; no `pnpm.overrides`, no ignore list):**
+  `@fastify/jwt` ^10.1.0 → ^10.2.7 (the first line requiring `fast-jwt ^6.3.4`,
+  which also clears two moderates; resolves 6.3.6); `next` ^16.3.6 → ^16.4.6
+  (latest 16.x patch, ≥16.4.1 for the criticals; also clears six 16.3.8
+  moderate/low); `zod` ^4.4.3 → ^4.6.7 in api and web (latest 4.x; web bumped
+  too so one version resolves). React, Fastify and every other dependency are
+  untouched.
+- **D3 tests.** Two new tests in `security.test.ts` (D4 block) drive a
+  test-only route behind `authenticate`: an HS256-signed JSON-array payload
+  (valid and already-expired) → 401, and `alg: none`, RS256 (key generated
+  in-test), HS384, HS512 → 401, each with an HS256 object-payload control →
+  200. **Run before the upgrade, the array-payload test failed (200)**, so
+  GHSA-5hjw was reproducible through `authenticate` on 6.2.4; the
+  non-HS256 test already passed (the HS256 pin held). Both pass after.
+- **Gates.** `pnpm audit --prod --audit-level=high` exits 0 (5 low / 6
+  moderate remain, listed in CLAUDE.md Open Items). `pnpm turbo run typecheck
+  test build --force` 9/9: 563 API (+2, 3 conditional `runIf` skips as
+  before) / 59 web / 16 shared; root `pnpm lint` green. `csp.test.ts` passes,
+  `images.unoptimized` is unchanged and `/_next/image` answers 404 on
+  `next start`.
+- **First Load JS** (Session 12.6 method: gzip of every non-`noModule`
+  `<script src>` on `next start`): `/` 203.2 → 204.2 kB, `/wallet` 205.5 →
+  206.5 kB (+0.5 %, below the +5 % flag line).
+
+**Notes / deviations.**
+- **Reachability, for the record.** The app uses no `'use cache'` and no
+  Server Actions (`'use server'`) in `apps/web/src`, and `/_next/image` was
+  already closed by `images.unoptimized`, so the Next criticals were very
+  likely unreachable in production; they were upgraded regardless. The
+  fast-jwt array/claim bypass needs a token signed with our secret, which the
+  API only ever signs as an object; the JWK confusion needs a JWK key, which
+  we never configure.
+- `apps/web/next-env.d.ts` was rewritten by the build (known Session 12.6
+  item) and restored.
+- Baseline First Load JS is ~57 kB above Session 12.6's figures; that is the
+  Session 13 Sentry client, not this session.
+
+**External Prerequisites:**
+- [ ] Owner: merge, CI green on the merge commit, `/health/ready` = 200, then
+  `Deploy` the merge sha (runbook § 5); expect smoke 16/18 (deviation 15).
