@@ -198,3 +198,40 @@ _Pre-Session 05 — payment stack decisions (Stripe permanently excluded):_
 - **Credit wallet model** — credits are an internal currency. `CreditWallet` table tracks balance per user. Purchase (Woovi PIX webhook / NOWPayments IPN) → credit balance up. AI image generation → credit balance down. No payment triggered at generation time. Subscription grants → `ContentAccess` rows via `grantContentAccess`.
 
 **Swap-readiness notes:** DB provider swappable behind Prisma; AI provider behind `AI_PROVIDER` env switch; storage behind S3-compatible env vars; email provider behind the `Emailer` interface; image processing behind the `ImageProcessor` interface; PIX payment provider behind `IPaymentProvider` (`PAYMENT_PROVIDER_PIX` env); crypto payment provider behind `IPaymentProvider` (`PAYMENT_PROVIDER_CRYPTO` env); card payment provider behind `IPaymentProvider` (`PAYMENT_PROVIDER_CARD` env, mocked until CCBill activation); payout provider behind `IPayoutProvider` (`PAYOUT_PROVIDER` env — `PaxumAdapter` / `MockPayoutProvider`, Session 06). All three payment channels were exercised through the abstraction in Session 05: swapping `PAYMENT_PROVIDER_PIX` from `woovi` to `mock` changes the adapter class and nothing else.
+## Session 13 — MVP Deployment
+
+- **Single droplet + Docker Compose.** One DigitalOcean droplet
+  (`visorfans-prod`, NYC1, Ubuntu 24.04) runs Caddy, api and web. Postgres
+  stays on Supabase, reached outbound only. Images are built only in GitHub
+  Actions (`linux/amd64`) and pulled from private GHCR; nothing is built on
+  the droplet.
+- **Edge split.** `app.visorfans.com` is Cloudflare-proxied with SSL Full
+  (strict) through a host-scoped Configuration Rule and an Origin CA
+  certificate (SAN `app` only); the zone-wide SSL mode is unchanged.
+  `api.visorfans.com` is DNS-only so that Caddy answers the ACME HTTP-01
+  challenge and API clients reach the droplet directly: real client IPs for rate
+  limits, WebSockets, and no 100 MB proxy cap. The apex stays on the Vercel
+  landing page.
+- **Proxy trust.** `TRUST_PROXY` is exactly the pinned compose subnet
+  `172.30.0.0/24`, and Docker runs with `userland-proxy: false`. It is never
+  `true` and never a hop count.
+- **Deploy gate.** CI deploys through a dedicated ed25519 key restricted by
+  `command="/opt/visorfans/bin/deploy-gate",restrict`, which accepts only
+  `deploy <hex sha>`. The host key is pinned in `DEPLOY_KNOWN_HOSTS`. The
+  `production` GitHub environment is restricted to `main`. A deploy runs pull →
+  migrate → up → health → ready, with automatic rollback to the previous sha.
+- **Database connectivity.** The droplet uses Supavisor **session** mode
+  (5432), because it is IPv4-only and the direct host is IPv6-only. Session
+  mode supports `prisma migrate deploy`; the transaction pooler (6543) is not
+  used for migrations.
+- **Provider channels in production.** Each channel is a live adapter or
+  `disabled`; `mock` is refused. Only crypto (NOWPayments) is live. Email is
+  `disabled` because Resend's AUP bars adult businesses (boot refuses `resend`).
+- **Monitoring.** Sentry reports only 5xx/unhandled errors, PII-scrubbed. The
+  browser tunnel `/monitoring` forwards only to the DSN baked into the build
+  (the stock `tunnelRoute` was an open relay and is not used). Tracing is off
+  until scrubbing moves to `beforeSendSpan`.
+- **Secret handling.** Values are never printed. They are verified by length
+  or sha256 prefix, single lines are rewritten with `read -rs` + `awk ENVIRON`,
+  and GitHub secrets are written by pipe from the droplet. Multi-line secrets
+  are kept only in Bitwarden Secure Notes.

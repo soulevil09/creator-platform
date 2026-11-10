@@ -525,3 +525,37 @@ Split out of CLAUDE.md in this commit (verbatim move; no content reworded).
 - [ ] Set up error monitoring: https://sentry.io → create account (free tier) → create project → copy `SENTRY_DSN`
 - [ ] (Optional) Uptime monitoring: https://betterstack.com/uptime → free tier available
 - [ ] (If running more than one API instance) Upstash Redis for the rate-limit store and messaging pub/sub: https://upstash.com → create Redis DB → copy `UPSTASH_REDIS_URL` and `UPSTASH_REDIS_TOKEN`
+## Session 13 — MVP Deployment ✅
+
+**Summary.** Part A (Claude Code) built the deploy stack: `infra/`
+(compose, Caddyfile, bootstrap, `deploy.sh`, `deploy-gate`), the `Deploy`
+workflow (amd64 images → GHCR → forced-command SSH → `scripts/smoke.ts`), the
+`disabled` provider mode (`mock` refused in production, `EMAIL_PROVIDER=resend`
+refused), Sentry for api and web with the `/monitoring` tunnel, and the
+`create-user` ops script. Part B (owner, via `docs/deploy/runbook.md`) cut
+production over between 2026-10-06 and 2026-11-09: Cloudflare DNS + Origin CA,
+droplet bootstrap, env files, deploy key + GitHub environment + GHCR, the
+first deploy of `471cefcd` with an admin, NOWPayments IPN plus one live payment,
+crons re-enabled, an ops check and a Sentry test event.
+
+**Verified live.** The `pro` credit pack was paid with 29.93 USDT (TRC-20) →
+NOWPayments `finished` → balance 0 → 1000, exactly one `wallet.credited`,
+idempotent across 4 status IPNs and 1 manual resend. Real client IPs are seen
+behind Caddy. Cookies flow `app` → `api` in Safari. Crons are green with
+counts-only summaries.
+
+**Notes / deviations.** 30 deviations are recorded in the runbook. The most
+consequential: Resend excluded (AUP); NOWPayments minimum ≈ USD 10.72 makes
+`starter`/`plus` unpayable in crypto; the Supabase free tier paused
+mid-cutover; NOWPayments fee observed at 1.0 % with revenue held on its
+custodial balance; Reconciliation does not cover payments; `smoke.ts` has 2
+false FAILs on proxied hosts; there is no browser login UI.
+
+**Incidents.** 2026-10-18: Origin CA key exposed in a chat transcript →
+certificate revoked and reissued. 2026-11-05: IPN secret mismatch (bad paste)
+→ regenerated 2026-11-06, before any live payment. 2026-11-08: Supabase
+paused → resumed, no data loss.
+
+**External prerequisites still open.** Paxum Business account, Replicate
+account, Woovi credentials + adult-policy confirmation, an adult-compatible
+email provider, the Supabase Pro decision, the NOWPayments custody decision.
