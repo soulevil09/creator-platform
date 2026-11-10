@@ -24,15 +24,20 @@ more robust/expensive services as revenue scales.
 | ORM / DB | Prisma + PostgreSQL (Supabase) | Type-safe client, migrations, swappable provider. Supabase = managed free Postgres, no card. |
 | Auth | JWT (access 15m + refresh 7d) — httpOnly cookies, RBAC | Stateless, framework-agnostic, refresh-token rotation. Implemented in Session 02. |
 | Storage | Supabase Storage (S3-compatible) | Finalized Session 03. Accessed via `@aws-sdk/client-s3` so the same code works against Cloudflare R2 / AWS S3 if swapped. Signed URLs via the presigner (local HMAC). |
-| Email | Resend | Free tier, simple API for transactional email. Active from Session 02. |
+| Email | _(disabled in production)_ — **Resend excluded** | Resend's AUP bars adult businesses; since Session 13 the API refuses to boot with `EMAIL_PROVIDER=resend`. Production runs `EMAIL_PROVIDER=disabled`: registration is closed and renewal reminders are skipped. An adult-compatible adapter (Mailgun/SES) is pending. |
 | AI Images | Replicate — `tencentarc/photomaker` (SDXL + stacked ID embeddings) | Implemented Session 08. Plain text-to-image SDXL cannot anchor a specific face; PhotoMaker conditions on 1–4 reference photos of the same person, which is exactly `ReferenceImage` (Session 03). Pay-per-use, no subscription. Provider-swappable via `IAIProvider` / `AI_PROVIDER`; wire format provisional until a live Replicate account is approved — see Open Items. |
 | Payments (PIX/BR) | **Woovi (OpenPix)** | Brazilian fintech, CNPJ-backed, PCI DSS compliant. PIX nativo com liquidação imediata. Plano percentual: 0,80% por transação (mín R$0,50 / máx R$5,00). Zero setup/monthly fee. API REST documentada, webhooks em tempo real, SDK Node.js oficial. Conta PJ criada com MEI CNPJ 67.735.318/0001-91, chave PIX CNPJ vinculada ao Nubank PJ. |
-| Payments (crypto) | **NOWPayments** | 0.5% per transaction, zero setup/monthly fee. 350+ cryptocurrencies + stablecoins (USDT, USDC). Native subscription/recurring billing API. Adult content explicitly permitted by ToS. Forbes Advisor #1 crypto gateway 2025. Non-custodial option available. |
+| Payments (crypto) | **NOWPayments** — **live since 2026-11-09** | Zero setup/monthly fee. 350+ cryptocurrencies + stablecoins (USDT, USDC). Native subscription/recurring billing API. Adult content explicitly permitted by ToS. **Observed service fee 1.0 %** on the first live payment (0.5 % had been assumed; confirm against the account's fee plan). The production store settles `usdttrc20`. Revenue currently stays on the NOWPayments **custodial balance** (`Payout address: Balance`); the custody vs auto-forward choice is an open pre-launch decision. Provider minimum ≈ USD 10.72 (2026-11-06). |
 | Payments (card — deferred) | _(CCBill — locked, post-MVP)_ | CCBill is the confirmed future card processor for international Visa/Mastercard. Requires Visa ($950/yr) + Mastercard ($500/yr) high-risk registration fees — deferred until platform generates enough revenue to absorb. Architecture is abstraction-ready on day one. |
 | Model payouts | **Paxum** mass payout REST API | Industry-standard for adult creator payouts. Implemented Session 06 as `PaxumAdapter implements IPayoutProvider`, selected via `PAYOUT_PROVIDER`. Weekly run triggered by a GitHub Actions cron job hitting `POST /api/payouts/run` behind a timing-safe service secret. 80/20 split (model/platform), R$50 minimum threshold. Wire format is provisional until the Business account is approved — see Open Items. |
 | Lint / Format | ESLint 9 (flat) + Prettier | One root config governs all packages; modern TS standard. |
 | Tests | Vitest (+ `@testing-library/react` / jsdom for `apps/web`, Session 09) | ESM/TS-native, Jest-compatible, fast. In-memory mocks for DB + email in auth tests. The web package got its first suite in Session 09: jsdom environment for DOM-behaviour tests, RTL for user-perceived queries. |
 | CI | GitHub Actions | Free tier, native GitHub integration. |
+| Hosting (Session 13) | DigitalOcean droplet `visorfans-prod` (NYC1, Ubuntu 24.04, 1 GB + 2 GB swap) + Docker Compose | **Caddy** (the only listener on 80/443) → **api** (Fastify) + **web** (Next.js) on the pinned internal network `172.30.0.0/24`. `userland-proxy: false`, so the API sees real client IPs. Key-only SSH as `deploy`; root login disabled; ufw 22/80/443; unattended security upgrades (reboot window 04:30 UTC). Resize to 2 GB at launch. |
+| Edge / DNS | Cloudflare (zone `visorfans.com`) | `app.visorfans.com` is **proxied**, with SSL Full (strict) via a host-scoped Configuration Rule and a Cloudflare Origin CA cert (SAN `app` only, expires 2041-10-14). `api.visorfans.com` is **DNS only**: Caddy obtains a Let's Encrypt cert, which keeps real client IPs, WebSockets and no proxy body cap. The apex stays on the Vercel landing (do not touch). |
+| Images / deploy | GHCR (private) + GitHub Actions `Deploy` | CI builds `linux/amd64` images; nothing is ever built on the droplet. `Deploy` (manual, pinned `sha`) connects over SSH with a forced-command key (`deploy-gate`, accepts only `deploy <sha>`) → `deploy.sh`: pull → migrate → up → health → ready, with automatic rollback → `scripts/smoke.ts`. The droplet pulls with a `read:packages` PAT (expires 2027-10-26). |
+| Database connection | Supabase via the **Supavisor session pooler** (port 5432) | The droplet is IPv4-only and Supabase's direct host is IPv6-only. `connection_limit=5&pool_timeout=20&sslmode=require`. The free tier **pauses** (pre-launch blocker). |
+| Monitoring (Session 13) | Sentry (`visorfans-api`, `visorfans-web`) | Reports 5xx/unhandled errors only, scrubbed of PII. Browser events go through the `/monitoring` tunnel, which is pinned to the build's DSN (never taken from the request). Tracing is **off** in both apps. Release = git sha. |
 
 > ⚠️ **Stripe is permanently excluded** from this project. Stripe explicitly prohibits adult content, AI-generated adult images, and credit-based adult platforms. Any suggestion to use Stripe must be rejected.
 
@@ -83,7 +88,7 @@ Rules every new change must follow. Each is true in the current code; the pointe
 - Key per-user limits with `app.rateLimit()` in a `preHandler` placed after `authenticate`/`authorize`; never `config.rateLimit` with a userId `keyGenerator`. (→ decisions.md § Session 11)
 - Use IP-keyed `config.rateLimit` only where no user exists yet. (→ decisions.md § Session 12)
 - Every route is authenticated and rate-limited, or listed in `PUBLIC_ROUTES`/`UNLIMITED_ROUTES` with a reason — `route-inventory.test.ts` fails otherwise. (→ decisions.md § Session 12)
-- Never set `TRUST_PROXY=true`; use a hop count or CIDR list. (→ decisions.md § Session 12)
+- Never set `TRUST_PROXY=true`. In production it is exactly the pinned compose subnet `172.30.0.0/24`, never a hop count (fastify ≥ 5.12.5 treats a number as "trust nothing", so every client would share one rate-limit budget). (→ decisions.md § Session 12, § Session 13)
 
 **Data exposure**
 - Never serialize a `storageKey`/`attachmentStorageKey`; deliver media only as short-TTL signed URLs or streamed bytes. (→ decisions.md § Session 04, § Session 07)
@@ -118,6 +123,15 @@ Rules every new change must follow. Each is true in the current code; the pointe
 **Web**
 - Mint a per-request CSP nonce in `apps/web/src/proxy.ts`; `script-src` never gets `'unsafe-inline'`, and never `'unsafe-eval'` in production; keep `images.unoptimized` so `/_next/image` stays closed. (→ decisions.md § Session 12, § Session 12.6)
 
+**Deployment & operations** (Session 13)
+- Never build on the droplet; deploy a pinned `sha` through the `Deploy` workflow (or `deploy.sh <sha>` for rollback). Do not push to `main` while a cutover is in progress. (→ docs/deployment/runbook.md)
+- Keep every migration backward-compatible for one release: rollback runs the older code against the newer schema. (→ runbook § 8)
+- `NEXT_PUBLIC_*` values are baked into the web image at build time; changing one means a new Deploy run.
+- A production provider channel is either a live adapter name or `disabled`, never `mock` (boot refuses). `EMAIL_PROVIDER=resend` is refused at boot.
+- Production secrets live only in `/opt/visorfans/env/*.env` (`600`, `deploy`), GitHub secrets and Bitwarden. Never print them: verify by length or `sha256` prefix, and move GitHub secrets through a pipe (`… | gh secret set`). Multi-line secrets go only into Bitwarden **Secure Notes**.
+- Keep Sentry tracing at 0 until scrubbing moves to `beforeSendSpan`. (→ Open Items)
+- Check `/health/ready` = 200 before any DB-dependent operation; a paused Supabase answers 503.
+
 **Testing & tooling**
 - Mock provider HTTP with `nock` and `disableNetConnect`; inject fakes for `StorageClient`, `Emailer`, `ImageProcessor` and `test/fake-prisma.ts`. (→ decisions.md § Session 04, § Session 05)
 - Run Prisma from `apps/api` (`pnpm --filter @creator-platform/api exec prisma …`), never a bare root `npx prisma`. (→ sessions.md § Session 07)
@@ -129,8 +143,8 @@ Rules every new change must follow. Each is true in the current code; the pointe
 
 | Flow | Method | Notes |
 |---|---|---|
-| Subscriber pays monthly subscription | Woovi PIX (BR) or Crypto (NOWPayments) | Grants access to model's content tier |
-| Subscriber buys credit pack | Woovi PIX (BR) or Crypto (NOWPayments) | Credits deposited to subscriber wallet |
+| Subscriber pays monthly subscription | Woovi PIX (BR) or Crypto (NOWPayments) | Grants access to model's content tier. **Production today: crypto only** (PIX `disabled`) |
+| Subscriber buys credit pack | Woovi PIX (BR) or Crypto (NOWPayments) | Credits deposited to subscriber wallet. In crypto only `pro` (29.99) clears the NOWPayments minimum; `starter`/`plus` are unpayable (pre-launch blocker) |
 | Subscriber spends credits | Internal debit (no new payment) | Triggers AI image generation |
 | Platform pays model | Paxum API (weekly) | 80% model / 20% platform, split stamped on each confirmed SUBSCRIPTION transaction; paid Mondays 12:00 UTC above a R$50 threshold |
 | _(Future)_ Subscriber pays via card | CCBill (post-MVP) | Activates when Visa/MC registration fees are sustainable |
@@ -165,10 +179,14 @@ MockPayoutProvider   implements IPayoutProvider   ← tests + PAYOUT_PROVIDER=mo
 MockPaymentProvider  implements IPaymentProvider  ← used in tests and for the deferred CCBill slot
 ```
 
-Active providers at MVP:
+Target providers at MVP:
 - `PAYMENT_PROVIDER_PIX=woovi` → `WooviPixAdapter`
 - `PAYMENT_PROVIDER_CRYPTO=nowpayments` → `NOWPaymentsAdapter`
-- `PAYMENT_PROVIDER_CARD=mock` → `MockPaymentProvider` (slot reserved for CCBill)
+- `PAYMENT_PROVIDER_CARD=mock` → `MockPaymentProvider` (slot reserved for CCBill; **local/dev only**)
+
+**Production as of Session 13** (each channel accepts `disabled`; `mock` is refused in production):
+- `PAYMENT_PROVIDER_CRYPTO=nowpayments`: **live**
+- `PAYMENT_PROVIDER_PIX=disabled`, `PAYMENT_PROVIDER_CARD=disabled`, `PAYOUT_PROVIDER=disabled`, `AI_PROVIDER=disabled`, `EMAIL_PROVIDER=disabled`
 
 The provider is selected at startup via env var and injected via the container. Business logic
 (credit wallet, subscription grants, revenue share) calls only the interface — never the adapter.
@@ -185,20 +203,22 @@ Full per-session Summary / Notes / Prerequisites: `docs/history/sessions.md`. Sp
 | 02 | Auth | ✅ Complete | Register/verify/login/refresh/logout/me, JWT httpOnly cookies, RBAC hooks, env validation. | `session-02.md` | — |
 | 03 | Model Onboarding | ✅ Complete | `ModelProfile` + `ReferenceImage`, S3-compatible storage, ToS/AI-consent flow, validated uploads. | `session-03.md` | — |
 | 04 | Content Management | ✅ Complete | `Content`/`ContentAccess`, upload + tiered access, on-the-fly watermarked serving, soft delete. | `session-04.md` | — |
-| 05 | Payments | ✅ Complete | `IPaymentProvider`, Woovi PIX + NOWPayments + mock card, idempotent webhooks, credit wallet. | `session-05.md` | [ ] Coletar `OPENPIX_APP_ID` no dashboard → API/Plugins _(code is ready; not needed for tests)_<br>[ ] Coletar `OPENPIX_WEBHOOK_SECRET` no dashboard → Webhooks → criar webhook<br>[ ] Criar conta NOWPayments: https://nowpayments.io → Sign Up<br>[ ] Coletar `NOWPAYMENTS_API_KEY` em Store Settings<br>[ ] Coletar `NOWPAYMENTS_IPN_SECRET` em IPN Settings<br>[ ] Conectar carteira USDT TRC-20 em Payout Settings |
-| 06 | Revenue Sharing & Payouts | ✅ Complete | 80/20 split stamped per transaction, ledger-derived balance, `PaxumAdapter`, weekly run, `payoutEmail`. | `session-06.md` | [ ] Create Paxum Business account: https://www.paxum.com → sign up as Business<br>[ ] Generate `PAYOUT_CRON_SECRET` (`openssl rand -hex 32`) and store it, plus `API_PUBLIC_URL`, as GitHub Actions repository secrets |
-| 06.5 | Subscription Lifecycle: Renewal & Cancellation | ✅ Complete | Renewal charges + reminders, grace period, `cancelAtPeriodEnd` cancel/resume, daily sweep. | `session-06.5.md` | [ ] Generate `SUBSCRIPTION_RENEWAL_CRON_SECRET` (`openssl rand -hex 32`) and store it as a GitHub Actions repository secret (alongside the existing `API_PUBLIC_URL`) |
+| 05 | Payments | ✅ Complete | `IPaymentProvider`, Woovi PIX + NOWPayments + mock card, idempotent webhooks, credit wallet. | `session-05.md` | [ ] Coletar `OPENPIX_APP_ID` no dashboard → API/Plugins _(code is ready; not needed for tests)_<br>[ ] Coletar `OPENPIX_WEBHOOK_SECRET` no dashboard → Webhooks → criar webhook<br>[x] Criar conta NOWPayments<br>[x] Coletar `NOWPAYMENTS_API_KEY` _(validated live, Session 13)_<br>[x] Coletar `NOWPAYMENTS_IPN_SECRET` _(regenerated 2026-11-06, fingerprint-matched)_<br>[x] Conectar carteira USDT TRC-20 (self-custody) em Payout Settings |
+| 06 | Revenue Sharing & Payouts | ✅ Complete | 80/20 split stamped per transaction, ledger-derived balance, `PaxumAdapter`, weekly run, `payoutEmail`. | `session-06.md` | [ ] Create Paxum Business account: https://www.paxum.com → sign up as Business<br>[ ] Generate `PAYOUT_CRON_SECRET` in `api.env` and re-sync the repo secret by pipe when Paxum goes live _(the current repo secret predates production and has no `api.env` counterpart)_<br>[x] `API_PUBLIC_URL` repo secret = `https://api.visorfans.com` (Session 13) |
+| 06.5 | Subscription Lifecycle: Renewal & Cancellation | ✅ Complete | Renewal charges + reminders, grace period, `cancelAtPeriodEnd` cancel/resume, daily sweep. | `session-06.5.md` | [x] `SUBSCRIPTION_RENEWAL_CRON_SECRET` in `api.env` + repo secret (Session 13) |
 | 07 | Real-Time Private Messaging | ✅ Complete | Subscription-gated 1:1 messaging, attachments, broadcast-only WebSocket fan-out. | `session-07.md` | — |
 | 08 | AI Image Personalization | ✅ Complete | PhotoMaker via `IAIProvider`, hidden anchor prompt, safety gate, credit debit + auto-refund. | `session-08.md` | [ ] Create Replicate account: https://replicate.com → sign up → go to https://replicate.com/account/api-tokens → generate token → copy `AI_PROVIDER_API_KEY`<br>[ ] Review the `tencentarc/photomaker` model on Replicate and confirm the pinned version hash is current<br>[ ] Add billing method on Replicate (pay-per-use): https://replicate.com/account/billing |
-| 09 | Anti-Leak & Content Protection | ✅ Complete | HMAC trace codes on served media, `ProtectedMedia` deterrents, storage cleanup sweep. | `session-09.md` | [ ] Generate `WATERMARK_TRACE_SECRET` (`openssl rand -hex 32`, ≥ 32 chars) for every deployed environment — **the API will not boot without it**<br>[ ] Generate `STORAGE_CLEANUP_CRON_SECRET` (`openssl rand -hex 32`) and store it as a GitHub Actions repository secret (alongside the existing `API_PUBLIC_URL`) |
+| 09 | Anti-Leak & Content Protection | ✅ Complete | HMAC trace codes on served media, `ProtectedMedia` deterrents, storage cleanup sweep. | `session-09.md` | [x] `WATERMARK_TRACE_SECRET` in production `api.env` (Session 13)<br>[x] `STORAGE_CLEANUP_CRON_SECRET` in `api.env` + repo secret (Session 13) |
 | 09.5 | Lei FELCA: Age Verification (CPF + Face ID) | ⏳ Deferred | Lei 15.211/2025 CPF + facial age verification — deferred by business decision. | `session-09.5.md` _(to be written)_ | [ ] Confirm CAF/Certta's enterprise-tier biometric face-match pricing — the self-service "Certta Start" plan (R$200–600/mo, R$1.50–2.50/consulta) covers CPF/document/background checks only; CPF alone is explicitly equated to self-declaration in ANPD's draft guide, so it does NOT satisfy the law on its own<br>[ ] Confirm CAF/Certta (or alternative: idwall, unico, Serpro Datavalid direct — the last requires SENATRAN/Credencia accreditation + a GCC intermediary, heavier onboarding) accepts adult-content platforms as a client<br>[ ] Vendor API credentials + webhook secret |
 | 10 | i18n & Multilingual | ✅ Complete | `next-intl` cookie-based locale, PT-BR/EN catalogs, `preferredLocale`, localized email. | `session-10.md` | — |
 | 11 | Admin Dashboard | ✅ Complete | Model approval, user suspension, metrics, admin payout run, content reports, `/admin` UI. | `session-11.md` | [ ] (Optional) Analytics: https://posthog.com → create account (free tier) → copy project API key — not taken this session |
 | 11.5 | Hotfix: Per-User Rate Limits Were Silently Keying on IP | ✅ Complete | Per-user rate limits moved after `authenticate` (were keying on IP). | `session-11.5.md` | — |
-| 12 | Security Hardening & Performance Audit | ✅ Complete | CI audit/build, `TRUST_PROXY`, helmet, error surface, route inventory, reconciliation, indexes. | `session-12.md` | [ ] Generate `RECONCILIATION_CRON_SECRET` (`openssl rand -hex 32`) and store it as a GitHub Actions repository secret (alongside `API_PUBLIC_URL`) and in the API environment<br>[ ] Set `TRUST_PROXY` to the real hop count (or proxy CIDRs) of the deployment — Session 13<br>[ ] Set `NEXT_PUBLIC_MEDIA_ORIGIN` to the storage host signed URLs point at, so the web CSP lets media load<br>[ ] Run `pnpm --filter @creator-platform/api load` (full mode) against a non-production database to fill in the DB-backed baseline |
+| 12 | Security Hardening & Performance Audit | ✅ Complete | CI audit/build, `TRUST_PROXY`, helmet, error surface, route inventory, reconciliation, indexes. | `session-12.md` | [x] `RECONCILIATION_CRON_SECRET` in `api.env` + repo secret (Session 13)<br>[x] `TRUST_PROXY=172.30.0.0/24` (Session 13; real client IPs verified)<br>[x] `NEXT_PUBLIC_MEDIA_ORIGIN` = host of `STORAGE_ENDPOINT` (`https://<ref>.storage.supabase.co`) (Session 13)<br>[ ] Run `pnpm --filter @creator-platform/api load` (full mode) against a non-production database to fill in the DB-backed baseline |
 | 12.5 | FX-Aware Payouts & Credit-Spend Revenue Share | ⏳ Pending | Per-currency payouts with an FX policy; credit-spend revenue share. | `session-12.5.md` _(to be written)_ | [ ] Product decision: FX policy for models earning in BRL and USD<br>[ ] Product decision: the model's share of a credit spend |
 | 12.6 | Framework Upgrade: Next.js 16.3 (Active LTS) + React 19 | ✅ Complete | Next 16.3 + React 19, `proxy.ts`, `/_next/image` closed, zero audit exceptions, Node 22. | `session-12.6.md` | — |
-| 13 | MVP Deployment | ⏳ Next | Deploy, managed DB, custom domain, SSL, monitoring; Redis rate-limit store + pub/sub. | `session-13.md` | [ ] Choose and create hosting account (pick one):<br>[ ] **Register a custom domain — required, not optional** (https://porkbun.com or https://namecheap.com). Web and API must be served from the same registrable domain (e.g. `app.<domain>` / `api.<domain>`): the API's CORP `same-site` and the `SameSite=Strict` auth cookies both break across sites, and platform default subdomains (`*.up.railway.app`, `*.onrender.com`, `*.fly.dev`) are on the Public Suffix List, so they count as different sites. See Open Items.<br>[ ] Set up error monitoring: https://sentry.io → create account (free tier) → create project → copy `SENTRY_DSN`<br>[ ] (Optional) Uptime monitoring: https://betterstack.com/uptime → free tier available<br>[ ] (If running more than one API instance) Upstash Redis for the rate-limit store and messaging pub/sub: https://upstash.com → create Redis DB → copy `UPSTASH_REDIS_URL` and `UPSTASH_REDIS_TOKEN` |
+| 13 | MVP Deployment | ✅ Complete | DigitalOcean droplet + Docker Compose (Caddy/api/web), Cloudflare (`app` proxied, `api` DNS-only), GHCR + forced-command SSH deploy, Sentry, `disabled` provider mode. Cutover done 2026-11-09: one live NOWPayments payment end to end, idempotent IPNs, crons on. Redis deferred (single instance). | `session-13.md` + `docs/deployment/runbook.md` | [x] Custom domain `visorfans.com` (`app.` / `api.`)<br>[x] Sentry (`visorfans-api`, `visorfans-web`)<br>[ ] (Optional) Uptime monitoring: https://betterstack.com/uptime<br>[ ] (Only when running >1 API instance) Upstash Redis for rate-limit store + messaging pub/sub |
+| 13.5 | Post-Cutover Fixes | ⏳ Next _(proposed)_ | Repo fixes for cutover deviations: `smoke.ts` proxied-host TLS/server-header checks (dev 15), conditional `sentry_auth_token` (16), `NEXT_PUBLIC_MEDIA_ORIGIN` comment (12), runbook procedure fixes (25–30), caddy healthcheck, pin `runs-on: ubuntu-24.04`, Sentry `beforeSendSpan`, JWT secret min-length at boot. | `session-13.5.md` _(to be written)_ | — |
+| 14 | Launch Readiness | ⏳ Pending _(proposed)_ | Pre-launch blockers: `/login` + register UI, adult-compatible email adapter, crypto checkout below provider minimum, payment reconciliation sweep for stale `PENDING` charges, Supabase pausing. | `session-14.md` _(to be written)_ | [ ] Decide Supabase Pro<br>[ ] Decide NOWPayments custody vs auto-forward<br>[ ] Email provider account that accepts adult businesses<br>[ ] Confirm Woovi adult-content policy (suporte@woovi.com) |
 
 ---
 
@@ -211,6 +231,7 @@ Before changing an area, read the file that covers it:
 - `docs/history/resolved-items.md` — resolved Open Items (what was fixed, where, why).
 - `docs/history/last-updated.md` — earlier "Last Updated" entries.
 - `.claude/sessions/session-NN.md` — the original spec for each session.
+- `docs/deployment/runbook.md` — production topology, step-by-step operations, rollback, the Session 13 cutover log and deviations 1–30.
 
 ---
 
@@ -322,13 +343,20 @@ creator-platform/
 │   └── shared/                      # Framework-free types/constants/utils
 │       ├── src/index.ts             # Role, JwtPayload, AuthUser + locale/currency constants; LocalizedLabel, negotiateLocale (Session 10)
 │       └── src/locale.test.ts       # 6 tests — Accept-Language parser + catalog helpers (Session 10)
+├── infra/                           # Session 13 — copied to the droplet by bootstrap
+│   ├── compose.yaml                 # caddy + api + web (+ migrate), subnet 172.30.0.0/24, memory limits
+│   ├── Caddyfile                    # app (Origin CA cert) / api (Let's Encrypt), request_body 70 MiB
+│   └── bootstrap.sh                 # idempotent droplet setup; installs root-owned deploy.sh + deploy-gate
+├── scripts/smoke.ts                 # post-deploy smoke test (2 known false FAILs on proxied `app`, see Open Items)
 ├── .github/workflows/
 │   ├── ci.yml
+│   ├── deploy.yml                   # manual, pinned sha → build amd64 → GHCR → SSH deploy-gate → smoke (Session 13)
 │   ├── weekly-payout.yml            # Mon 12:00 UTC → POST /api/payouts/run
 │   ├── subscription-renewals.yml    # daily 06:00 UTC → POST /api/subscriptions/renewals/run
 │   ├── storage-cleanup.yml          # daily 07:00 UTC → POST /api/admin/storage/cleanup/run
 │   └── reconciliation.yml           # daily 07:30 UTC → POST /api/admin/reconciliation/run (Session 12)
 ├── docs/
+│   ├── deployment/runbook.md        # production runbook + Session 13 cutover log (Session 13)
 │   ├── security/owasp-audit.md      # OWASP Top 10 (2021) audit (Session 12)
 │   └── performance/                 # index-review.md, load-baseline.md (Session 12)
 ├── .claude/sessions/
@@ -356,7 +384,8 @@ All `.env*` files are gitignored; examples contain placeholders only.
 | `JWT_REFRESH_SECRET` | api | 02 | Refresh token signing secret (min 32 chars, different value) |
 | `JWT_EXPIRES_IN` | api | 02 | Access token lifetime (`15m`) |
 | `JWT_REFRESH_EXPIRES_IN` | api | 02 | Refresh token lifetime (`7d`) |
-| `EMAIL_API_KEY` | api | 02 | Resend API key (`re_…`) |
+| `EMAIL_API_KEY` | api | 02 | Email provider API key (not set while `EMAIL_PROVIDER=disabled`) |
+| `EMAIL_PROVIDER` | api | 13 | `disabled` in production; `resend` is refused at boot (AUP bars adult businesses) |
 | `EMAIL_FROM` | api | 02 | Sender address (`noreply@yourdomain.com`) |
 | `APP_URL` | api | 02 | Allowed CORS origin + base URL for email links |
 | `API_PORT` | api | 01 | Fastify listen port (default `4000`) |
@@ -398,23 +427,57 @@ All `.env*` files are gitignored; examples contain placeholders only.
 | `STORAGE_CLEANUP_CRON_SECRET` | api | 09 | Shared secret for `POST /api/admin/storage/cleanup/run` (timing-safe compare); mirrored as a GitHub Actions repo secret |
 | `NEXT_PUBLIC_APP_URL` / `NEXT_PUBLIC_API_URL` | web | — | Public URLs for the web app |
 | `NEXT_PUBLIC_DEFAULT_LOCALE` | web | 10 | Default UI locale (`pt-BR` \| `en`) |
-| `TRUST_PROXY` | api | 12 | Fastify `trustProxy`: unset/`false` (default), a hop count, or comma-separated proxy IPs/CIDRs. `true` is rejected at boot |
+| `TRUST_PROXY` | api | 12 | Fastify `trustProxy`: unset/`false` (default) or comma-separated proxy IPs/CIDRs. `true` is rejected at boot. Production: `172.30.0.0/24` (never a hop count) |
 | `RECONCILIATION_CRON_SECRET` | api | 12 | Shared secret for `POST /api/admin/reconciliation/run` (timing-safe compare; required in production); mirrored as a GitHub Actions repo secret |
 | `GENERATION_STALE_AFTER_MS` | api | 12 | Age at which a PENDING generation is refunded + FAILED by the sweep (default `2 × GENERATION_TIMEOUT_MS`; must exceed it) |
 | `PAYOUT_STALE_AFTER_HOURS` | api | 12 | Age at which a PENDING/PROCESSING payout is flagged `payout.stale_detected` (default `72`) |
 | `NEXT_PUBLIC_MEDIA_ORIGIN` | web | 12 | Storage origin signed media URLs point at; added to the web CSP `img-src`/`media-src` |
 | `LOAD_TEST_FORBIDDEN_HOSTS` | load script | 12 | Comma-separated DB hosts (exact or `.suffix`) the load harness refuses to run against |
+| `CONTENT_UPLOAD_MAX_BYTES` | api | 13 | Upload ceiling, buffered in memory: production `67108864` (64 MiB); boot fails above 96 MiB. Caddy allows 70 MiB |
+| `SENTRY_DSN` / `SENTRY_ENVIRONMENT` | api | 13 | `visorfans-api` DSN / `production`. `SENTRY_RELEASE` = deployed git sha (present in the container) |
+| `NEXT_PUBLIC_SENTRY_DSN` | web (build) | 13 | `visorfans-web` DSN, baked at build time (GitHub environment variable) |
+| `NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE` | web (build) | 13 | Unset → 0. Keep 0 until scrubbing moves to `beforeSendSpan` |
+| `GHCR_OWNER` / `API_TLS` / `API_HOST` / `APP_HOST` | droplet `compose.env` | 13 | Compose interpolation: image owner (`soulevil09`), ACME email, hosts (default the production hosts). `IMAGE_TAG` is set per deploy |
+| `DEPLOY_HOST` / `DEPLOY_KNOWN_HOSTS` / `DEPLOY_SSH_KEY` | GitHub env `production` (secrets) | 13 | Droplet IP, pinned ed25519 host key, forced-command CI key (private key archived in Bitwarden only) |
+| `APP_URL` / `API_URL` / `SENTRY_PROJECT_WEB` / `SENTRY_AUTH_TOKEN` (optional) / `SENTRY_ORG` (optional) | GitHub env `production` (variables/secret) | 13 | Build-time values for the web image; no `SENTRY_AUTH_TOKEN` today (no source-map upload) |
 
 ---
 
 ## Open Items / Known Issues
 
-- No frontend auth UI yet — login/register pages arrive in a future session
+### Pre-launch blockers (from the Session 13 cutover — see `docs/deployment/runbook.md`)
+
+- **No browser login/register UI** (Session 13, dev 18). Home is the "coming soon" page; `/admin` and `/wallet` are reachable only after a manual `POST /api/auth/login` from the app origin (done via Safari Web Inspector). Add `/login` (i18n, linked from home, error states) and registration.
+- **Registration is closed while email is disabled.** Resend is excluded (AUP); an adult-compatible email adapter (Mailgun/SES) is needed for verification emails and renewal reminders. Until then, the renewal sweep issues renewal charges **without notifying** subscribers (`remindersSkipped`).
+- **Crypto checkout below the NOWPayments minimum** (dev 20). The `usdttrc20` minimum was ≈ USD 10.72 on 2026-11-06, so `starter` (3.99) and `plus` (9.99) cannot be paid in crypto. Hide them, or reject them with a clear i18n error, for every pack or subscription tier below the provider minimum; or revise prices.
+- **Supabase free tier pauses** (dev 22). It paused mid-cutover with the API running, so `/health/ready` returns 503 and deploys abort at migrate. Decide on Supabase Pro, or guarantee activity.
+- **No payment reconciliation sweep** (dev 28). The Reconciliation cron covers AI generations and stale payouts only. A `PENDING` charge whose IPNs are all lost recovers only through NOWPayments retries or a manual dashboard **Resend IPN**. Add a sweep that calls `GET /v1/payment/{id}` for stale charges, or document the manual SOP.
+- **NOWPayments custody decision** (dev 27). Revenue stays on the custodial balance (`Payout address: Balance`). Choose between manual withdrawals (counterparty risk) and auto-forward to the self-custody payout wallet (a withdrawal fee each time, because the receiver pays). 29.6307 USDT sat on the balance after the test.
+- **NOWPayments fee is 1.0 %, not 0.5 %** (dev 27). Correct every revenue/split assumption (Session 12.5) and confirm the rate against the fee plan.
+
+### Session 13 follow-ups (non-blocking)
+
+- `scripts/smoke.ts` reports 2 false FAILs on Cloudflare-proxied `app` (dev 15): the TLS check must validate the public edge via DNS, and the server-header check must accept exactly `server: cloudflare` + `cf-ray`. The first Deploy run (`40432351313`) is red only because of these.
+- The Deploy workflow passes an empty `sentry_auth_token` build secret when `SENTRY_AUTH_TOKEN` is unset (dev 16); make that step conditional.
+- Fix the `NEXT_PUBLIC_MEDIA_ORIGIN` comment at `apps/web/Dockerfile:6`: it must be the host of `STORAGE_ENDPOINT` (dev 12).
+- **Sentry span scrubbing** (dev 19): with `traceLifecycle: 'stream'`, `beforeSendTransaction`/`ignoreTransactions` are ignored. Move scrubbing to `beforeSendSpan` (or set `traceLifecycle: 'static'`) **before** any non-zero tracing. Tracing is verified off in api and web.
+- Sentry web delivery is unproven in production (zero web events in 30 days). Send one browser test event through `/monitoring`, and apply the PII checklist to the first real event in each project.
+- Caddy has no Docker healthcheck (dev 30). Add one, or document that `/health/ready` through Caddy covers it.
+- Pin `runs-on: ubuntu-24.04` in all workflows (`ubuntu-latest` migrates to Ubuntu 26 from 2026-10-19).
+- Optional hardening: `/opt/visorfans` is `deploy` 755; consider `root:deploy 750` (not an escalation path today).
+- `PAYOUT_CRON_SECRET` repo secret is stale (it predates production); regenerate it in `api.env` and re-sync it by pipe when Paxum goes live.
+- NOWPayments "payment covering" is 0 %, so any short payment becomes `partially_paid`. Consider 0.5–1 % before launch.
+- Resize the droplet to 2 GB at launch (Resize → CPU and RAM only). Idle on 2026-11-09: api 92 MiB, web 76 MiB, caddy 14 MiB; 421 Mi available of 961 Mi.
+- GHCR pull PAT (`read:packages`) expires **2027-10-26** (calendar reminder).
+- The runbook's progress-log block can be trimmed once Session 13.5 lands; its deviations 1–30 are the source for the repo fixes.
+
+### Carried over
 - Free-tier first: all tooling choices must have a usable free tier at MVP
 - Architecture must allow swapping to paid/robust tiers without a major refactor
 - **Content uploads buffer the full file into memory before storage write** (Session 04) — acceptable at MVP; true streaming needs the S3 multipart upload API (deferred).
 - **Locked-teaser listing deferred** (Session 04) — the list endpoint hides inaccessible gated content rather than returning it with a null thumbnail; revisit if the UI wants upsell teasers.
-- **Provider request/response shapes need live verification** (Session 05) — the Woovi and NOWPayments adapters were written against published API docs and exercised only against nock-mocked HTTP, because neither merchant account is approved yet. Re-verify field names (`charge.brCode`, `charge.transactionID`, `pay_address`, `pay_amount`, the `x-webhook-signature` / `x-nowpayments-sig` schemes) against a live sandbox charge before going to production.
+- **NOWPayments shapes verified live** (Session 13, 2026-11-09): `pay_address`, `pay_amount` (decimal string), `pay_currency` `usdttrc20`, `payin_extra_id` null, `order_id` = our `idempotencyKey`, `x-nowpayments-sig` HMAC-SHA512 (unsigned → 400; 5 signed IPNs → 200; one credit). No adapter mismatch. **Woovi is still unverified** (see below).
+- **Woovi provider request/response shapes need live verification** (Session 05) — the Woovi and NOWPayments adapters were written against published API docs and exercised only against nock-mocked HTTP, because neither merchant account is approved yet. Re-verify field names (`charge.brCode`, `charge.transactionID`, `pay_address`, `pay_amount`, the `x-webhook-signature` / `x-nowpayments-sig` schemes) against a live sandbox charge before going to production.
 - **Paxum request/response shapes need live verification** (Session 06) — the `PaxumAdapter` was written against Paxum's publicly documented mass-payout *mechanics* (Paxum-to-Paxum P2P by recipient email, batch submit, asynchronous IPN confirmation, major-unit decimal amounts) and exercised only against nock-mocked HTTP, because the Business account is not approved yet. **These are provisional, not confirmed fact:** the `POST /v1/mass-payouts` path, the `x-api-key` auth header, the request keys (`payments[].correlationId` / `recipientEmail` / `amount` / `currency`, `callbackUrl`), the response keys (`batchId`, `payments[].transactionId` / `status` / `errorMessage`), the `x-paxum-signature` header, and the HMAC-SHA256-hex-over-raw-body IPN scheme. Re-verify every one against a live sandbox batch before production. All of it is confined to `paxum.adapter.ts` behind `IPayoutProvider`.
 - **Payout earnings are summed in minor units without FX conversion** (Session 06) — the balance query sums `modelShareCents` across currencies, and a claim whose rows disagree falls back to `PAYOUT_CURRENCY`. Harmless while PIX/BRL dominates; a model earning in both BRL (PIX) and USD (crypto) needs per-currency payouts and an FX policy. **Still open after Session 11** (deliberately not touched — the admin metrics report per currency and never sum across them, so the gap is visible rather than hidden). Out of Session 12's scope (needs an FX-policy product decision) — **moved to Session 12.5**.
 - **Credit-pack revenue is still not shared with models** (Session 06, by design) — `GenerationJob.modelId` now exists (Session 08), so the prerequisite for attributing credit spend to a model is in place, but the payout run itself still only sums `PaymentTransaction.modelShareCents` and has no path from a `GenerationJob` to a model's balance. Out of Session 12's scope (needs a product decision on the model's share of a credit spend) — **moved to Session 12.5**.
@@ -428,7 +491,7 @@ All `.env*` files are gitignored; examples contain placeholders only.
 - **Content published after a subscription starts is not auto-granted** (Session 05) — `ContentAccess` rows are written at confirmation time for the model's then-published catalogue. New uploads mid-period need either a grant-on-publish hook or a subscription-aware check in `resolveAccess`. Revisit when upload cadence matters.
 - **Woovi adult content policy** — Woovi/OpenPix é um gateway PIX brasileiro regulado. Antes de ir ao ar em produção com conteúdo explícito adulto, confirmar com o suporte deles (suporte@woovi.com) se aceitam plataformas adult 18+. PIX em si não tem restrição de conteúdo (é infraestrutura do Banco Central), mas o gateway pode ter política própria.
 - **CCBill deferred to post-MVP** — $1,450/yr Visa+MC registration fees make card processing financially unviable at MVP stage. CCBill slot is scaffolded as `MockPaymentProvider`. Activate when monthly revenue covers the annual fee.
-- **NOWPayments crypto-to-fiat conversion** — NOWPayments settles in cryptocurrency. To receive BRL/USD fiat, platform must maintain exchange accounts (Bybit/OKX/Binance) and execute regular USDT→fiat withdrawals. This is an operational step outside the codebase.
+- **NOWPayments crypto-to-fiat conversion** — NOWPayments settles in cryptocurrency (custodial balance today). To receive BRL/USD fiat, the platform needs an exchange account and regular USDT→fiat withdrawals; this is an operational step outside the codebase. OKX worked for BRL↔USDT/TRX over PIX during the cutover. Binance is excluded after its 2026-10-29 hack (deposits/withdrawals suspended), and Bybit failed for the owner. Never use an exchange deposit address as the NOWPayments payout wallet.
 - **Lei FELCA compliance (Brazil) — DEFERRED, accepted risk** — Lei 15.211/2025 requires adult platforms to implement CPF + Face ID age verification. Penalties: up to R$50M or 10% of annual Brazil revenue; full ANPD enforcement begins January 2027. **Deliberately deferred past Session 09** (business decision, 2026-09-14) to prioritize time-to-MVP — the platform runs non-compliant with the self-declaration ban until Session 09.5 ships. Note: bare CPF validation does not satisfy the law on its own (ANPD's draft guide equates it to self-declaration without proof of ownership) — the eventual fix needs a real biometric face-match, not just a CPF lookup. Must resume before meaningful Brazilian subscriber volume. ANPD is the enforcement authority.
 - **One `AuditLog` row per image/video serve** (Session 09) — the trace trail grows with view volume, not with money events. Harmless at MVP; a retention policy for `content.served` / `generation.image_served` rows (e.g. 12 months) belongs in the same reconciliation/cleanup job family. **Still open** (not in the Session 12 spec).
 - **`ProtectedMedia` is not wired into a real viewer yet** (Session 09) — there is no content-viewing page; the component is exercised only by the `/dev/protected-media` demo (placeholders, 404 in prod) and its tests. The future subscriber UI must wrap every `<img>`/`<video>` served from `/serve` or `/generations/:id/image` in it and pass the `traceCode` (video: from the JSON; image: a future header or the code is simply already burned in).
@@ -437,13 +500,13 @@ All `.env*` files are gitignored; examples contain placeholders only.
 - **Paxum → Woovi/NOWPayments wire** — model payouts via Paxum require the platform to accumulate earnings from Woovi and NOWPayments, then fund the Paxum business account. Still a manual treasury step outside the codebase (Session 06 automates the *distribution*, not the *funding*); document the SOP before the first live run.
 - **MEI faturamento limit** — MEI CNPJ 67.735.318/0001-91 has R$130k/year revenue cap. When platform revenue approaches this threshold, migrate to ME (Microempresa) with a contador. This unlocks higher volume and formal payroll if needed.
 - **Telegram Stars** — optional secondary channel for microtransactions on Telegram bots. ~32% effective fee on mobile purchases. 21-day withdrawal hold. iOS restrictions on adult content via Stars. Not a primary payment channel — integrate only if there is an active Telegram community.
-- **Messaging fan-out is process-local, not horizontally scalable** (Session 07) — `connections.ts` holds an in-memory `Map<userId, Set<socket>>`. A recipient connected to a different API instance never receives the live push (they still see the message on next history fetch — nothing is lost, just not real-time across instances). Needs a shared pub/sub (Redis or similar) before running more than one API instance. **Moved to Session 13** (deployment), together with the rate-limit store below.
+- **Messaging fan-out is process-local, not horizontally scalable** (Session 07) — `connections.ts` holds an in-memory `Map<userId, Set<socket>>`. A recipient connected to a different API instance never receives the live push (they still see the message on next history fetch — nothing is lost, just not real-time across instances). Needs a shared pub/sub (Redis or similar) before running more than one API instance. **Deferred in Session 13**: production runs a single API instance. Do it together with the rate-limit store below, before scaling out.
 - **`npx prisma` must be run from `apps/api`, not the repo root** (Session 07 tooling note) — in this pnpm workspace, `prisma` is a devDependency of `@creator-platform/api` only. Running a bare `npx prisma migrate deploy` from the monorepo root can resolve an unrelated package instead of the pinned local CLI, producing confusing errors with no resemblance to Prisma's actual command set. Always `cd apps/api` first, or use `pnpm --filter @creator-platform/api exec prisma <command>`.
-- **Web and API must share one registrable domain — a custom domain is required** (Session 12 addendum, for Session 13) — serve them as e.g. `app.<domain>` / `api.<domain>`. Two things break across sites: the API sends `Cross-Origin-Resource-Policy: same-site` (so the web origin could not load the watermarked image streams), and the auth cookies are `SameSite=Strict` (so the browser would not send them on the web app's credentialed API calls). Platform default subdomains (`*.up.railway.app`, `*.onrender.com`, `*.fly.dev`) are on the Public Suffix List, so `web.x.up.railway.app` and `api.x.up.railway.app` count as **different sites**. The custom domain is therefore a requirement, not optional.
+- ~~**Web and API must share one registrable domain**~~ **Resolved in Session 13**: `app.visorfans.com` / `api.visorfans.com`; cookie flow `app` → `api` verified in Safari (ITP OK). Original note: (Session 12 addendum, for Session 13) — serve them as e.g. `app.<domain>` / `api.<domain>`. Two things break across sites: the API sends `Cross-Origin-Resource-Policy: same-site` (so the web origin could not load the watermarked image streams), and the auth cookies are `SameSite=Strict` (so the browser would not send them on the web app's credentialed API calls). Platform default subdomains (`*.up.railway.app`, `*.onrender.com`, `*.fly.dev`) are on the Public Suffix List, so `web.x.up.railway.app` and `api.x.up.railway.app` count as **different sites**. The custom domain is therefore a requirement, not optional.
 - **Generation success path is not a compare-and-set** (Session 12 addendum, low priority, not fixed) — `generation.service.ts` completes a job with an unconditional `prisma.generationJob.update({ where: { id } })`. It should be an `updateMany({ where: { id, status: 'PENDING' } })` CAS, so a job the reconciliation sweep has already FAILED and refunded can never flip to COMPLETED if a provider call hangs past `GENERATION_STALE_AFTER_MS`. Today only the boot-time rule `GENERATION_STALE_AFTER_MS > GENERATION_TIMEOUT_MS` prevents it (the request's own budget normally ends first).
-- **Rate-limit counters are in-memory, per process** (Session 12 audit, A07) — `@fastify/rate-limit` uses its default local store, so every budget is per API instance; two instances double every limit. Correct for the single-instance MVP. A Redis-backed store is **scheduled for Session 13**, alongside messaging pub/sub.
+- **Rate-limit counters are in-memory, per process** (Session 12 audit, A07) — `@fastify/rate-limit` uses its default local store, so every budget is per API instance; two instances double every limit. Correct for the single-instance MVP. A Redis-backed store is **deferred until a second API instance** (not done in Session 13), alongside messaging pub/sub.
 - **Register answers 409 for an existing email** (Session 12, accepted risk, A07) — reveals that an address has an account; mitigated by the 5/IP/hour limit (per real client once `TRUST_PROXY` is set). Future fix: a uniform 201 either way plus an "account already exists" email to the owner.
-- **`JWT_SECRET` / `JWT_REFRESH_SECRET` length is not enforced at boot** (Session 12 audit, A02) — `env.ts` uses `required`, not `requiredMinLength`; `.env.example` asks for ≥32 chars. Switch both to `requiredMinLength(…, 32)`.
+- **`JWT_SECRET` / `JWT_REFRESH_SECRET` length is not enforced at boot** (Session 12 audit, A02) — `env.ts` uses `required`, not `requiredMinLength`; `.env.example` asks for ≥32 chars. Switch both to `requiredMinLength(…, 32)`. (Production values were verified at 64 chars, distinct, in Session 13.)
 - **Replicate output download has no host allowlist** (Session 12 audit, A10) — `replicate.adapter.ts` fetches whatever output URL the prediction names (no credentials are sent on that request). Pin it to Replicate's delivery host when the adapter is verified against a live account.
 - **Content list loads a model's whole catalogue, with an N+1 access check** (Session 12 index review, F1) — `listModelContent` has no `take` and runs one `contentAccess.findUnique` per gated row before paginating in memory. Fine at MVP catalogue sizes; see `docs/performance/index-review.md` for the fix.
 - **Load baseline has only the dry run** (Session 12, D8) — `docs/performance/load-baseline.md` measures `GET /health` only. The DB-backed scenarios need a non-production database; run `pnpm --filter @creator-platform/api load` against one (the only configured DB is the shared Supabase project, deliberately not load-tested).
@@ -454,4 +517,4 @@ All `.env*` files are gitignored; examples contain placeholders only.
 
 ---
 
-## Last Updated — Session 12.6 fastify hotfix + CLAUDE.md split. `fastify` bumped to `^5.12.5` (`f21f40e`), closing the X-Forwarded-For spoofing advisory ahead of setting `TRUST_PROXY`. CLAUDE.md restructured into an index plus Engineering Invariants, with session history, Architecture Decisions, resolved Open Items and earlier Last Updated entries moved verbatim to `docs/` (no content lost — 872/872 original lines verified). **Next: Session 13 (MVP Deployment).** [2026-09-28]
+## Last Updated — Session 13 (MVP Deployment) completed. Production is live on DigitalOcean (`visorfans-prod`, Docker Compose: Caddy → api + web) behind Cloudflare (`app` proxied, Full strict / `api` DNS-only, Let's Encrypt), release `471cefcd`, images from GHCR via a forced-command SSH deploy, Sentry on. Cutover (Part B) finished 2026-11-09: one live NOWPayments payment (`pro`, 29.93 USDT TRC-20) credited 1000 credits once across 5 IPNs; the renewal, storage-cleanup and reconciliation crons are enabled and green; Weekly payout stays disabled. Only the crypto channel is live; PIX, card, payouts, AI and email are `disabled`. Cutover log and deviations 1–30 are in `docs/deployment/runbook.md`. **Next: Session 13.5 (Post-Cutover Fixes), then Session 14 (Launch Readiness).** [2026-11-09]
